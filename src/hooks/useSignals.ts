@@ -1,60 +1,26 @@
 "use client";
 
-import { useCallback, useSyncExternalStore } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 import { v4 as uuidv4 } from "uuid";
 import type { Signal, SignalDirection } from "@/types/signal";
 
 const STORAGE_KEY = "crypto_signals_v1";
 
-// Stable empty array — used for SSR and as the initial client snapshot.
-const EMPTY_SNAPSHOT: Signal[] = [];
-
-let snapshot: Signal[] = EMPTY_SNAPSHOT;
-let storeHydrated = false;
-let listeners: Array<() => void> = [];
-
-function hydrateOnce() {
-  if (storeHydrated) return;
-  storeHydrated = true;
+function loadFromStorage(): Signal[] {
   try {
     const raw = localStorage.getItem(STORAGE_KEY);
-    if (raw) {
-      snapshot = JSON.parse(raw) as Signal[];
-    }
+    return raw ? (JSON.parse(raw) as Signal[]) : [];
   } catch {
-    snapshot = EMPTY_SNAPSHOT;
+    return [];
   }
 }
 
-function subscribe(listener: () => void) {
-  const needsHydration = !storeHydrated;
-  listeners.push(listener);
-  if (needsHydration) {
-    hydrateOnce();
-    // Force one re-render after hydration even when localStorage is empty.
-    queueMicrotask(() => listener());
-  }
-  return () => {
-    listeners = listeners.filter((l) => l !== listener);
-  };
-}
-
-function getSnapshot(): Signal[] {
-  return snapshot;
-}
-
-function getServerSnapshot(): Signal[] {
-  return EMPTY_SNAPSHOT;
-}
-
-function commitSnapshot(next: Signal[]) {
+function saveToStorage(signals: Signal[]) {
   try {
-    localStorage.setItem(STORAGE_KEY, JSON.stringify(next));
+    localStorage.setItem(STORAGE_KEY, JSON.stringify(signals));
   } catch {
     // ignore quota errors
   }
-  snapshot = next;
-  for (const listener of listeners) listener();
 }
 
 export interface AddSignalInput {
@@ -69,7 +35,20 @@ export interface AddSignalInput {
 }
 
 export function useSignals() {
-  const signals = useSyncExternalStore(subscribe, getSnapshot, getServerSnapshot);
+  const [signals, setSignals] = useState<Signal[]>([]);
+  const [hydrated, setHydrated] = useState(false);
+  const initialized = useRef(false);
+
+  // One-time hydration from localStorage (client only).
+  useEffect(() => {
+    if (initialized.current) return;
+    initialized.current = true;
+    const stored = loadFromStorage();
+    requestAnimationFrame(() => {
+      setSignals(stored);
+      setHydrated(true);
+    });
+  }, []);
 
   const addSignal = useCallback((input: AddSignalInput): Signal => {
     const signal: Signal = {
@@ -84,35 +63,47 @@ export function useSignals() {
       addedAt: Date.now(),
       note: input.note,
     };
-    commitSnapshot([...getSnapshot(), signal]);
+    setSignals((prev) => {
+      const updated = [...prev, signal];
+      saveToStorage(updated);
+      return updated;
+    });
     return signal;
   }, []);
 
   const closeSignal = useCallback((id: string, closedPrice: number) => {
-    commitSnapshot(
-      getSnapshot().map((s) =>
+    setSignals((prev) => {
+      const updated = prev.map((s) =>
         s.id === id
-          ? { ...s, status: "CLOSED", closedAt: Date.now(), closedPrice }
+          ? { ...s, status: "CLOSED" as const, closedAt: Date.now(), closedPrice }
           : s
-      )
-    );
+      );
+      saveToStorage(updated);
+      return updated;
+    });
   }, []);
 
   const cancelSignal = useCallback((id: string) => {
-    commitSnapshot(
-      getSnapshot().map((s) =>
-        s.id === id ? { ...s, status: "CANCELLED" } : s
-      )
-    );
+    setSignals((prev) => {
+      const updated = prev.map((s) =>
+        s.id === id ? { ...s, status: "CANCELLED" as const } : s
+      );
+      saveToStorage(updated);
+      return updated;
+    });
   }, []);
 
   const deleteSignal = useCallback((id: string) => {
-    commitSnapshot(getSnapshot().filter((s) => s.id !== id));
+    setSignals((prev) => {
+      const updated = prev.filter((s) => s.id !== id);
+      saveToStorage(updated);
+      return updated;
+    });
   }, []);
 
   return {
     signals,
-    hydrated: storeHydrated,
+    hydrated,
     addSignal,
     closeSignal,
     cancelSignal,
