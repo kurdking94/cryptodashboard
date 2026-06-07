@@ -6,16 +6,29 @@ import type { Signal, SignalDirection } from "@/types/signal";
 
 const STORAGE_KEY = "crypto_signals_v1";
 
-// ── Storage helpers ──────────────────────────────────────────────────────────
+// ── Module-level cache ───────────────────────────────────────────────────────
+// useSyncExternalStore requires getSnapshot to return the same reference
+// when the data has not changed. We keep a single cached array here and
+// only replace it when we explicitly write new data.
 
-function readStorage(): Signal[] {
+const SERVER_SNAPSHOT: Signal[] = []; // stable empty array for SSR
+
+let _cache: Signal[] | null = null;
+
+function getSnapshot(): Signal[] {
+  if (_cache !== null) return _cache;
   try {
-    const raw =
-      typeof window !== "undefined" ? localStorage.getItem(STORAGE_KEY) : null;
-    return raw ? (JSON.parse(raw) as Signal[]) : [];
+    const raw = localStorage.getItem(STORAGE_KEY);
+    _cache = raw ? (JSON.parse(raw) as Signal[]) : SERVER_SNAPSHOT;
   } catch {
-    return [];
+    _cache = SERVER_SNAPSHOT;
   }
+  return _cache;
+}
+
+function getServerSnapshot(): Signal[] {
+  // Always return the same stable reference during SSR / hydration
+  return SERVER_SNAPSHOT;
 }
 
 function writeStorage(signals: Signal[]) {
@@ -24,11 +37,12 @@ function writeStorage(signals: Signal[]) {
   } catch {
     // ignore quota errors
   }
+  // Replace the cache with the new array, then notify subscribers
+  _cache = signals;
+  notifyListeners();
 }
 
-// ── useSyncExternalStore store ───────────────────────────────────────────────
-// Using useSyncExternalStore avoids calling setState inside effects, which is
-// the React-idiomatic way to integrate with external state systems like localStorage.
+// ── Pub/sub ──────────────────────────────────────────────────────────────────
 
 let _listeners: Array<() => void> = [];
 
@@ -43,6 +57,8 @@ function notifyListeners() {
   for (const l of _listeners) l();
 }
 
+// ── Hook ─────────────────────────────────────────────────────────────────────
+
 export interface AddSignalInput {
   symbol: string;
   direction: SignalDirection;
@@ -55,78 +71,54 @@ export interface AddSignalInput {
 }
 
 export function useSignals() {
-  // useSyncExternalStore: React 18 idiomatic way to read from external stores
   const signals = useSyncExternalStore(
     subscribe,
-    readStorage,         // client snapshot
-    () => [] as Signal[] // server snapshot (SSR)
+    getSnapshot,        // client: returns cached reference — stable between writes
+    getServerSnapshot   // server/SSR: always returns the same [] reference
   );
 
-  const persist = useCallback((updated: Signal[]) => {
-    writeStorage(updated);
-    notifyListeners();
+  const addSignal = useCallback((input: AddSignalInput): Signal => {
+    const signal: Signal = {
+      id: uuidv4(),
+      symbol: input.symbol.toUpperCase().replace(/\s/g, ""),
+      direction: input.direction,
+      entryPrice: input.entryPrice, // locked at live price — PnL starts at 0%
+      takeProfit: input.takeProfit,
+      stopLoss: input.stopLoss,
+      leverage: input.leverage ?? 1,
+      status: "ACTIVE",
+      addedAt: Date.now(),
+      note: input.note,
+    };
+    writeStorage([...getSnapshot(), signal]);
+    return signal;
   }, []);
 
-  /**
-   * Add a new signal.
-   * entryPrice MUST come from a live price fetch done right before this call.
-   * The PnL on a brand-new signal will therefore be exactly 0 %.
-   */
-  const addSignal = useCallback(
-    (input: AddSignalInput): Signal => {
-      const current = readStorage();
-      const signal: Signal = {
-        id: uuidv4(),
-        symbol: input.symbol.toUpperCase().replace(/\s/g, ""),
-        direction: input.direction,
-        entryPrice: input.entryPrice, // locked here — never changes
-        takeProfit: input.takeProfit,
-        stopLoss: input.stopLoss,
-        leverage: input.leverage ?? 1,
-        status: "ACTIVE",
-        addedAt: Date.now(),
-        note: input.note,
-      };
-      persist([...current, signal]);
-      return signal;
-    },
-    [persist]
-  );
+  const closeSignal = useCallback((id: string, closedPrice: number) => {
+    writeStorage(
+      getSnapshot().map((s) =>
+        s.id === id
+          ? { ...s, status: "CLOSED", closedAt: Date.now(), closedPrice }
+          : s
+      )
+    );
+  }, []);
 
-  const closeSignal = useCallback(
-    (id: string, closedPrice: number) => {
-      persist(
-        readStorage().map((s) =>
-          s.id === id
-            ? { ...s, status: "CLOSED", closedAt: Date.now(), closedPrice }
-            : s
-        )
-      );
-    },
-    [persist]
-  );
+  const cancelSignal = useCallback((id: string) => {
+    writeStorage(
+      getSnapshot().map((s) =>
+        s.id === id ? { ...s, status: "CANCELLED" } : s
+      )
+    );
+  }, []);
 
-  const cancelSignal = useCallback(
-    (id: string) => {
-      persist(
-        readStorage().map((s) =>
-          s.id === id ? { ...s, status: "CANCELLED" } : s
-        )
-      );
-    },
-    [persist]
-  );
-
-  const deleteSignal = useCallback(
-    (id: string) => {
-      persist(readStorage().filter((s) => s.id !== id));
-    },
-    [persist]
-  );
+  const deleteSignal = useCallback((id: string) => {
+    writeStorage(getSnapshot().filter((s) => s.id !== id));
+  }, []);
 
   return {
     signals,
-    hydrated: true, // useSyncExternalStore handles SSR correctly
+    hydrated: true,
     addSignal,
     closeSignal,
     cancelSignal,
