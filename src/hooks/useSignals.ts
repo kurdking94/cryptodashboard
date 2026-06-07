@@ -6,58 +6,56 @@ import type { Signal, SignalDirection } from "@/types/signal";
 
 const STORAGE_KEY = "crypto_signals_v1";
 
-// ── Module-level cache ───────────────────────────────────────────────────────
-// useSyncExternalStore requires getSnapshot to return the same reference
-// when the data has not changed. We keep a single cached array here and
-// only replace it when we explicitly write new data.
+// Stable empty array — used for SSR and as the initial client snapshot.
+const EMPTY_SNAPSHOT: Signal[] = [];
 
-const SERVER_SNAPSHOT: Signal[] = []; // stable empty array for SSR
+let snapshot: Signal[] = EMPTY_SNAPSHOT;
+let storeHydrated = false;
+let listeners: Array<() => void> = [];
 
-let _cache: Signal[] | null = null;
-
-function getSnapshot(): Signal[] {
-  if (_cache !== null) return _cache;
+function hydrateOnce() {
+  if (storeHydrated) return;
+  storeHydrated = true;
   try {
     const raw = localStorage.getItem(STORAGE_KEY);
-    _cache = raw ? (JSON.parse(raw) as Signal[]) : SERVER_SNAPSHOT;
+    if (raw) {
+      snapshot = JSON.parse(raw) as Signal[];
+    }
   } catch {
-    _cache = SERVER_SNAPSHOT;
+    snapshot = EMPTY_SNAPSHOT;
   }
-  return _cache;
 }
-
-function getServerSnapshot(): Signal[] {
-  // Always return the same stable reference during SSR / hydration
-  return SERVER_SNAPSHOT;
-}
-
-function writeStorage(signals: Signal[]) {
-  try {
-    localStorage.setItem(STORAGE_KEY, JSON.stringify(signals));
-  } catch {
-    // ignore quota errors
-  }
-  // Replace the cache with the new array, then notify subscribers
-  _cache = signals;
-  notifyListeners();
-}
-
-// ── Pub/sub ──────────────────────────────────────────────────────────────────
-
-let _listeners: Array<() => void> = [];
 
 function subscribe(listener: () => void) {
-  _listeners.push(listener);
+  const needsHydration = !storeHydrated;
+  listeners.push(listener);
+  if (needsHydration) {
+    hydrateOnce();
+    // Force one re-render after hydration even when localStorage is empty.
+    queueMicrotask(() => listener());
+  }
   return () => {
-    _listeners = _listeners.filter((l) => l !== listener);
+    listeners = listeners.filter((l) => l !== listener);
   };
 }
 
-function notifyListeners() {
-  for (const l of _listeners) l();
+function getSnapshot(): Signal[] {
+  return snapshot;
 }
 
-// ── Hook ─────────────────────────────────────────────────────────────────────
+function getServerSnapshot(): Signal[] {
+  return EMPTY_SNAPSHOT;
+}
+
+function commitSnapshot(next: Signal[]) {
+  try {
+    localStorage.setItem(STORAGE_KEY, JSON.stringify(next));
+  } catch {
+    // ignore quota errors
+  }
+  snapshot = next;
+  for (const listener of listeners) listener();
+}
 
 export interface AddSignalInput {
   symbol: string;
@@ -71,18 +69,14 @@ export interface AddSignalInput {
 }
 
 export function useSignals() {
-  const signals = useSyncExternalStore(
-    subscribe,
-    getSnapshot,        // client: returns cached reference — stable between writes
-    getServerSnapshot   // server/SSR: always returns the same [] reference
-  );
+  const signals = useSyncExternalStore(subscribe, getSnapshot, getServerSnapshot);
 
   const addSignal = useCallback((input: AddSignalInput): Signal => {
     const signal: Signal = {
       id: uuidv4(),
       symbol: input.symbol.toUpperCase().replace(/\s/g, ""),
       direction: input.direction,
-      entryPrice: input.entryPrice, // locked at live price — PnL starts at 0%
+      entryPrice: input.entryPrice,
       takeProfit: input.takeProfit,
       stopLoss: input.stopLoss,
       leverage: input.leverage ?? 1,
@@ -90,12 +84,12 @@ export function useSignals() {
       addedAt: Date.now(),
       note: input.note,
     };
-    writeStorage([...getSnapshot(), signal]);
+    commitSnapshot([...getSnapshot(), signal]);
     return signal;
   }, []);
 
   const closeSignal = useCallback((id: string, closedPrice: number) => {
-    writeStorage(
+    commitSnapshot(
       getSnapshot().map((s) =>
         s.id === id
           ? { ...s, status: "CLOSED", closedAt: Date.now(), closedPrice }
@@ -105,7 +99,7 @@ export function useSignals() {
   }, []);
 
   const cancelSignal = useCallback((id: string) => {
-    writeStorage(
+    commitSnapshot(
       getSnapshot().map((s) =>
         s.id === id ? { ...s, status: "CANCELLED" } : s
       )
@@ -113,12 +107,12 @@ export function useSignals() {
   }, []);
 
   const deleteSignal = useCallback((id: string) => {
-    writeStorage(getSnapshot().filter((s) => s.id !== id));
+    commitSnapshot(getSnapshot().filter((s) => s.id !== id));
   }, []);
 
   return {
     signals,
-    hydrated: true,
+    hydrated: storeHydrated,
     addSignal,
     closeSignal,
     cancelSignal,
