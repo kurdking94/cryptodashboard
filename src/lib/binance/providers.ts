@@ -23,6 +23,31 @@ export interface RawTicker {
   indexPrice?: string;
 }
 
+/** Accept raw array or wrapped API payloads from any provider/version. */
+export function normalizeTickersPayload(json: unknown): RawTicker[] {
+  if (Array.isArray(json)) return json as RawTicker[];
+  if (!json || typeof json !== "object") return [];
+
+  const obj = json as Record<string, unknown>;
+  if (Array.isArray(obj.tickers)) return obj.tickers as RawTicker[];
+  if (Array.isArray(obj.data)) return obj.data as RawTicker[];
+  return [];
+}
+
+function normalizeMexcTicker(t: Record<string, string>): RawTicker {
+  return {
+    symbol: t.symbol,
+    lastPrice: t.lastPrice ?? "0",
+    priceChangePercent: t.priceChangePercent ?? "0",
+    volume: t.volume ?? "0",
+    quoteVolume: t.quoteVolume ?? "0",
+    highPrice: t.highPrice ?? t.lastPrice ?? "0",
+    lowPrice: t.lowPrice ?? t.lastPrice ?? "0",
+    bidPrice: t.bidPrice,
+    askPrice: t.askPrice,
+  };
+}
+
 const OKX = "https://www.okx.com/api/v5";
 const MEXC = "https://api.mexc.com/api/v3";
 const BINANCE_SPOT = "https://data-api.binance.vision/api/v3";
@@ -99,14 +124,16 @@ async function fetchMexcTickers(): Promise<RawTicker[] | null> {
   const res = await safeFetch(`${MEXC}/ticker/24hr`);
   if (!res) return null;
   const data = await res.json();
-  if (!Array.isArray(data)) return null;
-  return data;
+  const rows = normalizeTickersPayload(data);
+  if (!rows.length) return null;
+  return rows.map((t) => normalizeMexcTicker(t as unknown as Record<string, string>));
 }
 
 async function fetchBinanceSpotTickers(): Promise<RawTicker[] | null> {
   const res = await safeFetch(`${BINANCE_SPOT}/ticker/24hr`);
   if (!res) return null;
-  return res.json();
+  const rows = normalizeTickersPayload(await res.json());
+  return rows.length ? rows : null;
 }
 
 export async function fetchTickersMulti(): Promise<{ data: RawTicker[]; provider: DataProvider }> {
@@ -234,8 +261,13 @@ export async function fetchTickersClientDirect(): Promise<{ data: RawTicker[]; p
   try {
     const res = await fetch(`${MEXC}/ticker/24hr`);
     if (res.ok) {
-      const data = await res.json();
-      return { data, provider: "mexc" };
+      const rows = normalizeTickersPayload(await res.json());
+      if (rows.length) {
+        return {
+          data: rows.map((t) => normalizeMexcTicker(t as unknown as Record<string, string>)),
+          provider: "mexc",
+        };
+      }
     }
   } catch { /* continue */ }
 
@@ -243,8 +275,8 @@ export async function fetchTickersClientDirect(): Promise<{ data: RawTicker[]; p
   try {
     const res = await fetch(`${BINANCE_FUTURES}/fapi/v1/ticker/24hr`);
     if (res.ok) {
-      const data = await res.json();
-      return { data, provider: "binance_futures" };
+      const rows = normalizeTickersPayload(await res.json());
+      if (rows.length) return { data: rows, provider: "binance_futures" };
     }
   } catch { /* continue */ }
 

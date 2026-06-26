@@ -7,7 +7,7 @@ export async function GET() {
     return NextResponse.json({ provider, tickers: data });
   } catch (e) {
     return NextResponse.json(
-      { error: "All providers failed", detail: String(e), hint: "Binance blocked on Vercel US — using Bybit fallback" },
+      { error: "All providers failed", detail: String(e), hint: "Binance blocked on Vercel US — using OKX/MEXC fallback" },
       { status: 502 }
     );
   }
