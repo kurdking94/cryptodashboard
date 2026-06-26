@@ -40,7 +40,7 @@ import { DEFAULT_RISK, INITIAL_BALANCE } from "@/types/trading";
 import { v4 as uuidv4 } from "uuid";
 
 const STORAGE_KEY = "futures_bot_v2";
-const SCAN_INTERVAL_MS = 45_000;
+const SCAN_INTERVAL_MS = 5 * 60 * 1000; // 5 minutes
 
 interface BotContextValue extends BotState {
   wallet: WalletState;
@@ -316,7 +316,7 @@ export function BotProvider({ children }: { children: ReactNode }) {
 
   const startBot = useCallback(() => {
     setBotRunning(true);
-    addLog("info", "system", `Paper simulator started — $${balanceRef.current.toFixed(2)} balance, ${risk.positionSizePercent}% per trade, ${risk.maxLeverage}x leverage`);
+    addLog("info", "system", `Paper simulator started — $${balanceRef.current.toFixed(2)} balance, ${risk.positionSizePercent}% per trade, ${risk.maxLeverage}x leverage, auto-scan every 5 min`);
   }, [risk, addLog]);
 
   const stopBot = useCallback(() => {

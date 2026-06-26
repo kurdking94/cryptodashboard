@@ -29,7 +29,7 @@ export default function OverviewPage() {
         <div>
           <h1 className="text-xl font-bold">Paper Simulator</h1>
           <p className="text-xs text-gray-500 mt-0.5">
-            ${risk.initialBalance} wallet · {risk.positionSizePercent}% per trade · {risk.maxLeverage}x leverage · data via {dataProvider}
+            ${risk.initialBalance} wallet · {risk.positionSizePercent}% per trade · {risk.maxLeverage}x leverage · auto-scan every 5 min · data via {dataProvider}
           </p>
         </div>
         <BotControls />
