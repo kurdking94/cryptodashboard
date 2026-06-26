@@ -3,15 +3,25 @@ import { STRATEGY_REGISTRY } from "@/lib/strategies";
 import { calcTpLevels } from "@/lib/risk/manager";
 import type { AnalyzedSignal, BotLog, LogCategory, Position, ScanSignal, StrategyHealth } from "@/types/trading";
 
-export function enrichScanSignal(signal: AnalyzedSignal, scanId: string): ScanSignal {
-  const { takeProfits, stopLoss } = calcTpLevels(signal.price, signal.direction, signal.volatility);
+export function migrateScanSignal(signal: ScanSignal | (Omit<ScanSignal, "id" | "scanId" | "takeProfits" | "stopLoss"> & Partial<Pick<ScanSignal, "id" | "scanId" | "takeProfits" | "stopLoss">>)): ScanSignal {
+  const price = signal.price ?? 0;
+  const direction = signal.direction ?? "LONG";
+  const volatility = signal.volatility ?? 2;
+  const levels = signal.takeProfits && signal.stopLoss != null
+    ? { takeProfits: signal.takeProfits, stopLoss: signal.stopLoss }
+    : calcTpLevels(price, direction, volatility);
+
   return {
-    ...signal,
-    id: uuidv4(),
-    scanId,
-    takeProfits,
-    stopLoss,
+    ...(signal as ScanSignal),
+    id: signal.id ?? uuidv4(),
+    scanId: signal.scanId ?? `legacy-${signal.scannedAt ?? Date.now()}`,
+    takeProfits: levels.takeProfits,
+    stopLoss: levels.stopLoss,
   };
+}
+
+export function enrichScanSignal(signal: AnalyzedSignal, scanId: string): ScanSignal {
+  return migrateScanSignal({ ...signal, scanId, id: uuidv4() });
 }
 
 export function migratePosition(p: Position): Position {
