@@ -2,10 +2,17 @@ import type { Candle, MarketTicker } from "@/types/trading";
 
 const BASE = "/api/binance";
 
+async function apiFetch<T>(path: string): Promise<T> {
+  const res = await fetch(path, { cache: "no-store" });
+  if (!res.ok) {
+    const err = await res.text().catch(() => "");
+    throw new Error(`API ${path} failed: ${res.status} ${err}`);
+  }
+  return res.json() as Promise<T>;
+}
+
 export async function fetchTopFuturesTickers(limit = 100): Promise<MarketTicker[]> {
-  const res = await fetch(`${BASE}/tickers`);
-  if (!res.ok) throw new Error(`Binance ticker error: ${res.status}`);
-  const data = (await res.json()) as Array<Record<string, string>>;
+  const data = await apiFetch<Array<Record<string, string>>>(`${BASE}/tickers`);
 
   return data
     .filter((t) => t.symbol.endsWith("USDT") && !t.symbol.includes("_"))
@@ -29,7 +36,7 @@ export async function fetchTopFuturesTickers(limit = 100): Promise<MarketTicker[
         volatility,
       };
     })
-    .filter((t) => t.quoteVolume24h > 1_000_000 && t.price > 0)
+    .filter((t) => t.quoteVolume24h > 500_000 && t.price > 0)
     .sort((a, b) => b.quoteVolume24h - a.quoteVolume24h)
     .slice(0, limit);
 }
@@ -39,10 +46,8 @@ export async function fetchKlines(
   interval: string,
   limit = 100
 ): Promise<Candle[]> {
-  const url = `${BASE}/klines?symbol=${symbol}&interval=${interval}&limit=${limit}`;
-  const res = await fetch(url);
-  if (!res.ok) throw new Error(`Klines error ${symbol}: ${res.status}`);
-  const data = (await res.json()) as Array<(string | number)[]>;
+  const url = `${BASE}/klines?symbol=${encodeURIComponent(symbol)}&interval=${interval}&limit=${limit}`;
+  const data = await apiFetch<Array<(string | number)[]>>(url);
   return data.map((k) => ({
     openTime: Number(k[0]),
     open: parseFloat(String(k[1])),
@@ -53,12 +58,31 @@ export async function fetchKlines(
   }));
 }
 
+export interface MarketContext {
+  fundingRate?: number;
+  markPrice?: number;
+  indexPrice?: number;
+  openInterest?: number;
+  prevOpenInterest?: number;
+}
+
+export async function fetchMarketContext(symbol: string): Promise<MarketContext> {
+  try {
+    const data = await apiFetch<{
+      fundingRate?: number;
+      markPrice?: number;
+      indexPrice?: number;
+      openInterest?: number;
+      prevOpenInterest?: number;
+    }>(`${BASE}/market?symbol=${encodeURIComponent(symbol)}`);
+    return data;
+  } catch {
+    return {};
+  }
+}
+
 const TF_MAP: Record<string, string> = {
-  "1m": "1m",
-  "5m": "5m",
-  "15m": "15m",
-  "1h": "1h",
-  "4h": "4h",
+  "1m": "1m", "5m": "5m", "15m": "15m", "1h": "1h", "4h": "4h",
 };
 
 export function intervalFor(tf: string): string {

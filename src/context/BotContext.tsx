@@ -266,6 +266,9 @@ export function BotProvider({ children }: { children: ReactNode }) {
       setValidation((v) => ({ ...v, liveSignals: result.signals.length > 0 }));
 
       addLog("signal", "signal", `Scan complete: ${result.signals.length} signals from ${result.pairsScanned} pairs (${result.latencyMs}ms)`);
+      if (result.errors.length > 0) {
+        addLog("warn", "error", `${result.errors.length} pair analysis errors (rate limit or data)`, { errors: result.errors.slice(0, 5) });
+      }
 
       const blocked = new Map<string, string>();
       recordConfidenceLog(result.signals, blocked);

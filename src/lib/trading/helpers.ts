@@ -1,4 +1,5 @@
 import { v4 as uuidv4 } from "uuid";
+import { STRATEGY_REGISTRY } from "@/lib/strategies";
 import type { BotLog, LogCategory, StrategyHealth } from "@/types/trading";
 
 export function createLog(
@@ -10,14 +11,20 @@ export function createLog(
   return { id: uuidv4(), timestamp: Date.now(), level, category, message, meta };
 }
 
-export const INITIAL_STRATEGY_HEALTH: StrategyHealth[] = [
-  { id: "ema_cross", name: "EMA Crossover", enabled: true, winRate: 0, avgWin: 0, avgLoss: 0, profitFactor: 0, maxDrawdown: 0, totalTrades: 0, wins: 0, losses: 0, avgRR: 0 },
-  { id: "rsi_momentum", name: "RSI Momentum", enabled: true, winRate: 0, avgWin: 0, avgLoss: 0, profitFactor: 0, maxDrawdown: 0, totalTrades: 0, wins: 0, losses: 0, avgRR: 0 },
-  { id: "macd", name: "MACD", enabled: true, winRate: 0, avgWin: 0, avgLoss: 0, profitFactor: 0, maxDrawdown: 0, totalTrades: 0, wins: 0, losses: 0, avgRR: 0 },
-  { id: "volume_breakout", name: "Volume Breakout", enabled: true, winRate: 0, avgWin: 0, avgLoss: 0, profitFactor: 0, maxDrawdown: 0, totalTrades: 0, wins: 0, losses: 0, avgRR: 0 },
-  { id: "bollinger", name: "Bollinger Bands", enabled: true, winRate: 0, avgWin: 0, avgLoss: 0, profitFactor: 0, maxDrawdown: 0, totalTrades: 0, wins: 0, losses: 0, avgRR: 0 },
-  { id: "trend_align", name: "Trend Alignment", enabled: true, winRate: 0, avgWin: 0, avgLoss: 0, profitFactor: 0, maxDrawdown: 0, totalTrades: 0, wins: 0, losses: 0, avgRR: 0 },
-];
+export const INITIAL_STRATEGY_HEALTH: StrategyHealth[] = STRATEGY_REGISTRY.map((s) => ({
+  id: s.id,
+  name: s.name,
+  enabled: !["funding_carry_bias", "williams_vix_fix"].includes(s.id),
+  winRate: 0,
+  avgWin: 0,
+  avgLoss: 0,
+  profitFactor: 0,
+  maxDrawdown: 0,
+  totalTrades: 0,
+  wins: 0,
+  losses: 0,
+  avgRR: 0,
+}));
 
 export function updateStrategyHealth(
   health: StrategyHealth[],

@@ -214,7 +214,7 @@ export const DEFAULT_RISK: RiskSettings = {
   dailyLossUsd: 0,
   cooldownMinutes: 5,
   killSwitch: false,
-  minConfidence: 65,
+  minConfidence: 50,
   maxSpreadPercent: 0.15,
   minVolume24h: 5_000_000,
 };

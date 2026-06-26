@@ -10,11 +10,11 @@ export async function GET(req: NextRequest) {
 
   try {
     const url = `${BASE}/fapi/v1/klines?symbol=${symbol}&interval=${interval}&limit=${limit}`;
-    const res = await fetch(url, { next: { revalidate: 10 } });
+    const res = await fetch(url, { cache: "no-store" });
     if (!res.ok) return NextResponse.json({ error: "Binance error" }, { status: res.status });
     const data = await res.json();
     return NextResponse.json(data);
-  } catch {
-    return NextResponse.json({ error: "Failed to fetch klines" }, { status: 500 });
+  } catch (e) {
+    return NextResponse.json({ error: "Failed to fetch klines", detail: String(e) }, { status: 500 });
   }
 }
