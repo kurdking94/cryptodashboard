@@ -45,7 +45,7 @@ import type {
   ValidationChecks,
   WalletState,
 } from "@/types/trading";
-import { DEFAULT_RISK, INITIAL_BALANCE } from "@/types/trading";
+import { DEFAULT_RISK, INITIAL_BALANCE, SCAN_PAIR_COUNT } from "@/types/trading";
 import { v4 as uuidv4 } from "uuid";
 
 const SCAN_INTERVAL_MS = 5 * 60 * 1000; // 5 minutes
@@ -288,10 +288,11 @@ export function BotProvider({ children }: { children: ReactNode }) {
     if (scanLock.current) return;
     scanLock.current = true;
     setIsScanning(true);
-    addLog("info", "signal", "Market scan started — top 100 pairs · all strategies on 45m, 1h, 4h");
+    addLog("info", "signal", `Market scan started — analyzing top ${SCAN_PAIR_COUNT} pairs · all strategies on 45m, 1h, 4h`);
 
     try {
-      const result = await runMarketScan(enabledIds.current, risk.minConfidence, (n) => setPairsScanned(n));
+      setPairsScanned(0);
+      const result = await runMarketScan(enabledIds.current, risk.minConfidence, (n, total) => setPairsScanned(n));
       const scanCompletedAt = Date.now();
 
       const scanId = uuidv4();

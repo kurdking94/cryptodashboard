@@ -242,3 +242,6 @@ export const DEFAULT_RISK: RiskSettings = {
 };
 
 export const TIMEFRAMES: Timeframe[] = ["45m", "1h", "4h"];
+
+/** Top USDT perpetual pairs analyzed each market scan */
+export const SCAN_PAIR_COUNT = 100;

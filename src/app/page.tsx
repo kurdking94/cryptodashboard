@@ -3,6 +3,7 @@
 import { useBot } from "@/context/BotContext";
 import BotControls from "@/components/layout/BotControls";
 import { StatCard, Badge, fmtPrice } from "@/components/shared/ui";
+import { SCAN_PAIR_COUNT } from "@/types/trading";
 
 function ValidationRow({ label, pass }: { label: string; pass: boolean }) {
   return (
@@ -77,7 +78,7 @@ export default function OverviewPage() {
         <div className="bg-gray-900 border border-gray-800 rounded-xl overflow-hidden lg:col-span-2">
           <div className="px-4 py-3 border-b border-gray-800 flex justify-between">
             <h2 className="text-sm font-bold">Live Signal Feed</h2>
-            <span className="text-xs text-gray-500">{signals.length} live · {signalHistory.length} in history · {pairsScanned} scanned</span>
+            <span className="text-xs text-gray-500">{signals.length} live · {signalHistory.length} in history · {pairsScanned}/{SCAN_PAIR_COUNT} scanned</span>
           </div>
           {topSignals.length === 0 ? (
             <p className="p-6 text-center text-gray-500 text-sm">Click Scan Now or Start Bot</p>

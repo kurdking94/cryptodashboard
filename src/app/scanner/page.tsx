@@ -1,6 +1,7 @@
 "use client";
 
 import { useState } from "react";
+import { SCAN_PAIR_COUNT } from "@/types/trading";
 import { useBot } from "@/context/BotContext";
 import BotControls from "@/components/layout/BotControls";
 import { Badge, fmtPrice } from "@/components/shared/ui";
@@ -36,7 +37,7 @@ export default function ScannerPage() {
         <div>
           <h1 className="text-xl font-bold">Market Scanner</h1>
           <p className="text-xs text-gray-500">
-            Top 100 futures · all 28 strategies × 45m/1h/4h · {pairsScanned} analyzed per scan
+            Top {SCAN_PAIR_COUNT} futures · all 28 strategies × 45m/1h/4h · {pairsScanned}/{SCAN_PAIR_COUNT} analyzed
             {lastScanAt && ` · ${new Date(lastScanAt).toLocaleTimeString()} (${scanLatencyMs}ms)`}
           </p>
         </div>
