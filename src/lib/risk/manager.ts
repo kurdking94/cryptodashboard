@@ -115,11 +115,14 @@ export function updatePositionPrices(
 ): Position[] {
   return positions.map((p) => {
     if (p.status !== "OPEN") return p;
-    const current = prices[p.symbol] ?? p.currentPrice;
+    const nextPrice = prices[p.symbol];
+    if (nextPrice == null || !Number.isFinite(nextPrice) || nextPrice <= 0) {
+      return p;
+    }
     const { pnlPercent, pnlUsd } = calcPnl(
-      p.entryPrice, current, p.direction, p.leverage, p.marginUsed
+      p.entryPrice, nextPrice, p.direction, p.leverage, p.marginUsed
     );
-    return { ...p, currentPrice: current, pnlPercent, pnlUsd };
+    return { ...p, currentPrice: nextPrice, pnlPercent, pnlUsd };
   });
 }
 

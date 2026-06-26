@@ -24,7 +24,7 @@ export default function ScannerPage() {
   const { signals, signalHistory, isScanning, lastScanAt, scanLatencyMs, pairsScanned } = useBot();
   const [filter, setFilter] = useState<"ALL" | "LONG" | "SHORT">("ALL");
   const [minConf, setMinConf] = useState(0);
-  const [view, setView] = useState<View>("latest");
+  const [view, setView] = useState<View>("history");
 
   const source = view === "latest" ? signals : signalHistory;
   const filtered = source

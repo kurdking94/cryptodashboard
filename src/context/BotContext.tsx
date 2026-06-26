@@ -15,10 +15,9 @@ import { runMarketScan } from "@/lib/engine/scanner";
 import { getActiveProvider } from "@/lib/binance/futures";
 import {
   canOpenPosition,
-  checkExits,
   openPaperPosition,
-  updatePositionPrices,
 } from "@/lib/risk/manager";
+import { refreshOpenPositions, summarizeOpenPnl } from "@/lib/trading/positions";
 import { computeScoreboard } from "@/lib/trading/scoreboard";
 import { runReplay, type ReplayResult } from "@/lib/trading/replay";
 import { createLog, enrichScanSignal, INITIAL_STRATEGY_HEALTH, migratePosition, updateStrategyHealth } from "@/lib/trading/helpers";
@@ -26,9 +25,9 @@ import {
   clearPersistedState,
   loadPersistedState,
   MAX_SIGNAL_HISTORY,
+  mergeAndSave,
   migrateSignals,
   restoreLatestSignals,
-  savePersistedState,
   type PersistedState,
 } from "@/lib/trading/storage";
 import { buildWallet } from "@/lib/wallet";
@@ -100,34 +99,42 @@ export function BotProvider({ children }: { children: ReactNode }) {
   const positionsRef = useRef(positions);
   const signalsRef = useRef(signals);
   const signalHistoryRef = useRef(signalHistory);
+  const closedPositionsRef = useRef(closedPositions);
+  const logsRef = useRef(logs);
+  const confidenceLogRef = useRef(confidenceLog);
   balanceRef.current = balance;
   positionsRef.current = positions;
   signalsRef.current = signals;
   signalHistoryRef.current = signalHistory;
+  closedPositionsRef.current = closedPositions;
+  logsRef.current = logs;
+  confidenceLogRef.current = confidenceLog;
+
+  const snapshotStorage = useCallback((patch?: Partial<PersistedState>): PersistedState => ({
+    mode: patch?.mode ?? mode,
+    lastScanAt: patch?.lastScanAt ?? lastScanAt,
+    scanLatencyMs: patch?.scanLatencyMs ?? scanLatencyMs,
+    pairsScanned: patch?.pairsScanned ?? pairsScanned,
+    signals: patch?.signals ?? signalsRef.current,
+    signalHistory: patch?.signalHistory ?? signalHistoryRef.current,
+    positions: patch?.positions ?? positionsRef.current,
+    closedPositions: patch?.closedPositions ?? closedPositionsRef.current,
+    replacementQueue: patch?.replacementQueue ?? replacementQueue,
+    risk: patch?.risk ?? risk,
+    strategyHealth: patch?.strategyHealth ?? strategyHealth,
+    logs: patch?.logs ?? logsRef.current,
+    confidenceLog: patch?.confidenceLog ?? confidenceLogRef.current,
+    validation: patch?.validation ?? validation,
+    lastReplacementAt: patch?.lastReplacementAt ?? lastReplacementAt,
+    balance: patch?.balance ?? balanceRef.current,
+    botRunning: patch?.botRunning ?? botRunning,
+    dataProvider: patch?.dataProvider ?? dataProvider,
+  }), [mode, lastScanAt, scanLatencyMs, pairsScanned, replacementQueue, risk, strategyHealth, validation, lastReplacementAt, botRunning, dataProvider]);
 
   const writeStorage = useCallback((patch?: Partial<PersistedState>) => {
     if (!hydratedRef.current) return;
-    savePersistedState({
-      mode: patch?.mode ?? mode,
-      lastScanAt: patch?.lastScanAt ?? lastScanAt,
-      scanLatencyMs: patch?.scanLatencyMs ?? scanLatencyMs,
-      pairsScanned: patch?.pairsScanned ?? pairsScanned,
-      signals: patch?.signals ?? signalsRef.current,
-      signalHistory: patch?.signalHistory ?? signalHistoryRef.current,
-      positions: patch?.positions ?? positionsRef.current,
-      closedPositions: patch?.closedPositions ?? closedPositions,
-      replacementQueue: patch?.replacementQueue ?? replacementQueue,
-      risk: patch?.risk ?? risk,
-      strategyHealth: patch?.strategyHealth ?? strategyHealth,
-      logs: patch?.logs ?? logs,
-      confidenceLog: patch?.confidenceLog ?? confidenceLog,
-      validation: patch?.validation ?? validation,
-      lastReplacementAt: patch?.lastReplacementAt ?? lastReplacementAt,
-      balance: patch?.balance ?? balanceRef.current,
-      botRunning: patch?.botRunning ?? botRunning,
-      dataProvider: patch?.dataProvider ?? dataProvider,
-    });
-  }, [mode, lastScanAt, scanLatencyMs, pairsScanned, closedPositions, replacementQueue, risk, strategyHealth, logs, confidenceLog, validation, lastReplacementAt, botRunning, dataProvider]);
+    mergeAndSave(snapshotStorage(patch));
+  }, [snapshotStorage]);
 
   useEffect(() => {
     const saved = loadPersistedState();
@@ -136,12 +143,25 @@ export function BotProvider({ children }: { children: ReactNode }) {
 
     /* eslint-disable react-hooks/set-state-in-effect -- one-time localStorage hydration */
     if (saved.mode) setModeState(saved.mode);
-    if (saved.positions) setPositions(saved.positions.map(migratePosition));
-    if (saved.closedPositions) setClosedPositions(saved.closedPositions);
+    if (saved.positions) {
+      const migrated = saved.positions.map(migratePosition);
+      setPositions(migrated);
+      positionsRef.current = migrated;
+    }
+    if (saved.closedPositions) {
+      setClosedPositions(saved.closedPositions);
+      closedPositionsRef.current = saved.closedPositions;
+    }
     if (saved.risk) setRisk({ ...DEFAULT_RISK, ...saved.risk });
     if (saved.strategyHealth) setStrategyHealth(saved.strategyHealth);
-    if (saved.logs) setLogs(saved.logs);
-    if (saved.confidenceLog) setConfidenceLog(saved.confidenceLog);
+    if (saved.logs) {
+      setLogs(saved.logs);
+      logsRef.current = saved.logs;
+    }
+    if (saved.confidenceLog) {
+      setConfidenceLog(saved.confidenceLog);
+      confidenceLogRef.current = saved.confidenceLog;
+    }
     setSignalHistory(history);
     setSignals(latest);
     signalsRef.current = latest;
@@ -166,7 +186,11 @@ export function BotProvider({ children }: { children: ReactNode }) {
   const scoreboard = useMemo(() => computeScoreboard(closedPositions), [closedPositions]);
 
   const addLog = useCallback((level: BotLog["level"], category: LogCategory, message: string, meta?: Record<string, unknown>) => {
-    setLogs((prev) => [...prev.slice(-399), createLog(level, category, message, meta)]);
+    setLogs((prev) => {
+      const next = [...prev.slice(-399), createLog(level, category, message, meta)];
+      logsRef.current = next;
+      return next;
+    });
   }, []);
 
   const executionLogs = useMemo(() => logs.filter((l) => l.category === "execution" || l.level === "trade"), [logs]);
@@ -199,7 +223,11 @@ export function BotProvider({ children }: { children: ReactNode }) {
       blocked: blocked.get(s.symbol),
       rankingReason: s.rankingReason,
     }));
-    setConfidenceLog((prev) => [...prev.slice(-80), ...entries]);
+    setConfidenceLog((prev) => {
+      const next = [...prev.slice(-80), ...entries];
+      confidenceLogRef.current = next;
+      return next;
+    });
     if (ranked.length >= 2 && ranked[0].confidence >= ranked[1].confidence) {
       setValidation((v) => ({ ...v, confidenceRanking: true }));
     }
@@ -208,8 +236,16 @@ export function BotProvider({ children }: { children: ReactNode }) {
   const handleClosed = useCallback((closed: Position[]) => {
     for (const c of closed) {
       addLog("trade", "execution", `EXIT ${c.symbol} ${c.status}: ${c.exitReason ?? "closed"} @ $${c.closedPrice?.toFixed(4)} PnL $${c.pnlUsd.toFixed(2)}`, { position: c });
-      setClosedPositions((cp) => [...cp, c]);
-      setBalance((b) => b + c.pnlUsd);
+      setClosedPositions((cp) => {
+        const next = [...cp, c];
+        closedPositionsRef.current = next;
+        return next;
+      });
+      setBalance((b) => {
+        const next = b + c.pnlUsd;
+        balanceRef.current = next;
+        return next;
+      });
       if (c.pnlUsd < 0) {
         setRisk((r) => ({ ...r, dailyLossUsd: r.dailyLossUsd + Math.abs(c.pnlUsd), lastLossAt: Date.now() }));
       }
@@ -288,37 +324,46 @@ export function BotProvider({ children }: { children: ReactNode }) {
     if (scanLock.current) return;
     scanLock.current = true;
     setIsScanning(true);
-    addLog("info", "signal", `Market scan started — analyzing top ${SCAN_PAIR_COUNT} pairs · all strategies on 45m, 1h, 4h`);
+    addLog("info", "signal", `Market scan started — analyzing top ${SCAN_PAIR_COUNT} pairs · open trades & history are preserved`);
 
     try {
+      // 1) Refresh open positions first — entry prices stay locked
+      const beforePnl = summarizeOpenPnl(positionsRef.current);
+      const preRefresh = await refreshOpenPositions(positionsRef.current);
+      if (preRefresh.closed.length > 0) {
+        handleClosed(preRefresh.closed);
+        balanceRef.current += preRefresh.closed.reduce((s, c) => s + c.pnlUsd, 0);
+      }
+      positionsRef.current = preRefresh.positions;
+      setPositions(preRefresh.positions);
+
       setPairsScanned(0);
-      const result = await runMarketScan(enabledIds.current, risk.minConfidence, (n, total) => setPairsScanned(n));
+      const result = await runMarketScan(enabledIds.current, risk.minConfidence, (n) => setPairsScanned(n));
       const scanCompletedAt = Date.now();
 
       const scanId = uuidv4();
       const enriched = result.signals.map((s) => enrichScanSignal(s, scanId));
-      const newHistory = [...enriched, ...signalHistoryRef.current].slice(0, MAX_SIGNAL_HISTORY);
+
+      let mergedHistory: ScanSignal[] = [];
+      setSignalHistory((prev) => {
+        mergedHistory = [...enriched, ...prev].slice(0, MAX_SIGNAL_HISTORY);
+        signalHistoryRef.current = mergedHistory;
+        return mergedHistory;
+      });
 
       signalsRef.current = enriched;
-      signalHistoryRef.current = newHistory;
       setSignals(enriched);
-      setSignalHistory(newHistory);
       setScanLatencyMs(result.latencyMs);
       setLastScanAt(scanCompletedAt);
       setPairsScanned(result.pairsScanned);
       setDataProvider(getActiveProvider());
       setValidation((v) => ({ ...v, liveSignals: result.signals.length > 0 }));
 
-      writeStorage({
-        signals: enriched,
-        signalHistory: newHistory,
-        lastScanAt: scanCompletedAt,
-        scanLatencyMs: result.latencyMs,
-        pairsScanned: result.pairsScanned,
-        dataProvider: getActiveProvider(),
-      });
-
-      addLog("signal", "signal", `Scan complete: ${result.signals.length} signals from ${result.pairsScanned} pairs (${result.latencyMs}ms)`);
+      addLog(
+        "signal",
+        "signal",
+        `Scan complete: ${result.signals.length} new signals · history now ${mergedHistory.length} total · ${result.pairsScanned} pairs (${result.latencyMs}ms)`
+      );
       if (result.errors.length > 0) {
         addLog("warn", "error", `${result.errors.length} pair analysis errors (rate limit or data)`, { errors: result.errors.slice(0, 5) });
       }
@@ -328,32 +373,50 @@ export function BotProvider({ children }: { children: ReactNode }) {
 
       const open = positionsRef.current.filter((p) => p.status === "OPEN");
       const candles = await fetchCandlesForOpen(open);
+      const postRefresh = await refreshOpenPositions(positionsRef.current, candles);
+      if (postRefresh.closed.length > 0) {
+        handleClosed(postRefresh.closed);
+        balanceRef.current += postRefresh.closed.reduce((s, c) => s + c.pnlUsd, 0);
+      }
 
-      const priceMap: Record<string, number> = {};
-      for (const [sym, c] of Object.entries(candles)) priceMap[sym] = c.close;
+      const afterPnl = summarizeOpenPnl(postRefresh.positions);
+      for (const after of afterPnl) {
+        const before = beforePnl.find((b) => b.id === after.id);
+        if (before && Math.abs(before.pnlPercent - after.pnlPercent) > 0.01) {
+          addLog(
+            "info",
+            "execution",
+            `PnL update ${after.symbol}: ${before.pnlPercent.toFixed(2)}% → ${after.pnlPercent.toFixed(2)}% (entry $${before.entry.toFixed(4)} locked)`
+          );
+        }
+      }
 
-      const openSymbols = new Set(open.map((p) => p.symbol));
+      const openSymbols = new Set(postRefresh.positions.filter((p) => p.status === "OPEN").map((p) => p.symbol));
       const tradeCandidates = enriched.filter((s) => !openSymbols.has(s.symbol));
       const livePrices = await fetchLivePrices(tradeCandidates.map((s) => s.symbol));
 
-      let updated = updatePositionPrices(positionsRef.current, priceMap);
-      const { updated: afterExit, closed } = checkExits(updated, candles);
-
-      const closedPnl = closed.reduce((s, c) => s + c.pnlUsd, 0);
-      const effectiveBalance = balanceRef.current + closedPnl;
-      if (closed.length > 0) handleClosed(closed);
-
+      let finalPositions = postRefresh.positions;
       if (mode !== "OFF" && !risk.killSwitch) {
-        const w = buildWallet(effectiveBalance, risk.initialBalance, afterExit);
-        const withNew = await processAutoTrades(enriched, afterExit, w, scanCompletedAt, livePrices);
-        positionsRef.current = withNew;
-        setPositions(withNew);
-        writeStorage({ positions: withNew, balance: effectiveBalance });
-      } else {
-        positionsRef.current = afterExit;
-        setPositions(afterExit);
-        writeStorage({ positions: afterExit, balance: effectiveBalance });
+        const w = buildWallet(balanceRef.current, risk.initialBalance, finalPositions);
+        finalPositions = await processAutoTrades(enriched, finalPositions, w, scanCompletedAt, livePrices);
       }
+
+      positionsRef.current = finalPositions;
+      setPositions(finalPositions);
+
+      writeStorage({
+        signals: enriched,
+        signalHistory: mergedHistory,
+        positions: finalPositions,
+        balance: balanceRef.current,
+        lastScanAt: scanCompletedAt,
+        scanLatencyMs: result.latencyMs,
+        pairsScanned: result.pairsScanned,
+        dataProvider: getActiveProvider(),
+        closedPositions: closedPositionsRef.current,
+        logs: logsRef.current,
+        confidenceLog: confidenceLogRef.current,
+      });
     } catch (err) {
       addLog("error", "error", `Scan failed: ${err instanceof Error ? err.message : "unknown"}`);
     } finally {
@@ -368,6 +431,26 @@ export function BotProvider({ children }: { children: ReactNode }) {
     const id = setInterval(runScanNow, SCAN_INTERVAL_MS);
     return () => clearInterval(id);
   }, [botRunning, runScanNow]);
+
+  // Live PnL refresh between scans — entry price never changes
+  useEffect(() => {
+    const open = positions.filter((p) => p.status === "OPEN");
+    if (!open.length || !hydrated) return;
+
+    const refresh = async () => {
+      const { positions: next, closed } = await refreshOpenPositions(positionsRef.current);
+      if (closed.length > 0) {
+        handleClosed(closed);
+        balanceRef.current += closed.reduce((s, c) => s + c.pnlUsd, 0);
+      }
+      positionsRef.current = next;
+      setPositions(next);
+      writeStorage({ positions: next, balance: balanceRef.current });
+    };
+
+    const id = setInterval(refresh, 30_000);
+    return () => clearInterval(id);
+  }, [positions, hydrated, handleClosed, writeStorage]);
 
   const startBot = useCallback(() => {
     setBotRunning(true);
@@ -395,9 +478,12 @@ export function BotProvider({ children }: { children: ReactNode }) {
         closedPrice: pos.currentPrice, exitReason: "Manual close",
       };
       handleClosed([closed]);
-      return prev.filter((p) => p.id !== id);
+      const next = prev.filter((p) => p.id !== id);
+      positionsRef.current = next;
+      writeStorage({ positions: next, closedPositions: closedPositionsRef.current, balance: balanceRef.current });
+      return next;
     });
-  }, [handleClosed]);
+  }, [handleClosed, writeStorage]);
 
   const killAll = useCallback(() => {
     setPositions((prev) => {

@@ -40,27 +40,15 @@ export function restoreLatestSignals(
   return history.filter((s) => s.scanId === latestScanId);
 }
 
-export function savePersistedState(state: PersistedState) {
-  const payload: PersistedState = {
-    mode: state.mode,
-    signals: state.signals,
-    signalHistory: (state.signalHistory ?? []).slice(-MAX_SIGNAL_HISTORY),
-    positions: state.positions,
-    closedPositions: (state.closedPositions ?? []).slice(-200),
-    replacementQueue: state.replacementQueue,
-    risk: state.risk,
-    strategyHealth: state.strategyHealth,
-    logs: (state.logs ?? []).slice(-400),
-    confidenceLog: (state.confidenceLog ?? []).slice(-100),
-    validation: state.validation,
-    lastScanAt: state.lastScanAt,
-    scanLatencyMs: state.scanLatencyMs,
-    pairsScanned: state.pairsScanned,
-    lastReplacementAt: state.lastReplacementAt,
-    balance: state.balance,
-    botRunning: state.botRunning,
-    dataProvider: state.dataProvider,
-  };
+/** Merge patch into existing storage — undefined fields keep prior values. */
+export function mergeAndSave(patch: PersistedState) {
+  const existing = loadPersistedState();
+  const payload: PersistedState = { ...existing, ...patch };
+
+  if (payload.logs) payload.logs = payload.logs.slice(-400);
+  if (payload.confidenceLog) payload.confidenceLog = payload.confidenceLog.slice(-100);
+  if (payload.closedPositions) payload.closedPositions = payload.closedPositions.slice(-200);
+  if (payload.signalHistory) payload.signalHistory = payload.signalHistory.slice(-MAX_SIGNAL_HISTORY);
 
   const write = (data: PersistedState) => localStorage.setItem(STORAGE_KEY, JSON.stringify(data));
 
@@ -75,7 +63,6 @@ export function savePersistedState(state: PersistedState) {
         logs: (payload.logs ?? []).slice(0, 100),
       });
     } catch {
-      /* storage full — keep positions/balance at minimum */
       try {
         write({
           balance: payload.balance,
