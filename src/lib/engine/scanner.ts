@@ -2,8 +2,8 @@ import { analyzePair } from "@/lib/engine/analyzer";
 import { fetchTopFuturesTickers } from "@/lib/binance/futures";
 import type { ScanSignal } from "@/types/trading";
 
-const BATCH_SIZE = 4;
-const DEEP_SCAN_COUNT = 30;
+const BATCH_SIZE = 5;
+const SCAN_PAIR_COUNT = 100;
 
 export async function runMarketScan(
   enabledStrategyIds: Set<string>,
@@ -15,7 +15,7 @@ export async function runMarketScan(
   let tickers;
 
   try {
-    tickers = await fetchTopFuturesTickers(100);
+    tickers = await fetchTopFuturesTickers(SCAN_PAIR_COUNT);
   } catch (e) {
     throw new Error(`Failed to fetch tickers: ${e instanceof Error ? e.message : "unknown"}`);
   }
@@ -26,7 +26,7 @@ export async function runMarketScan(
 
   const btcTicker = tickers.find((t) => t.symbol === "BTCUSDT");
   const btcChange = btcTicker?.change24h ?? 0;
-  const candidates = tickers.slice(0, DEEP_SCAN_COUNT);
+  const candidates = tickers.slice(0, SCAN_PAIR_COUNT);
   const signals: ScanSignal[] = [];
 
   for (let i = 0; i < candidates.length; i += BATCH_SIZE) {
