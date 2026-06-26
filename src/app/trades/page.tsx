@@ -64,7 +64,9 @@ export default function TradesPage() {
                     <div><span className="text-gray-500">SL (exit)</span><p className="text-red-400">${fmtPrice(p.stopLoss)}</p></div>
                     <div><span className="text-gray-500">Liq.</span><p className="text-orange-400">${fmtPrice(p.liquidationPrice)}</p></div>
                   </div>
-                  <p className="text-[10px] text-gray-500 mb-2">Conf {p.confidence}% · {p.strategies.join(", ")}</p>
+                  <p className="text-[10px] text-gray-500 mb-2">
+                    Conf {p.confidence}% · Entry locked @ ${fmtPrice(p.entryPrice)} · PnL starts at 0%
+                  </p>
                   <button onClick={() => closePosition(p.id)} className="px-3 py-1 rounded-lg bg-gray-700 text-xs hover:bg-gray-600">
                     Manual Close
                   </button>

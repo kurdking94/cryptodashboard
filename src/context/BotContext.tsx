@@ -10,7 +10,7 @@ import {
   useState,
   type ReactNode,
 } from "react";
-import { fetchKlines } from "@/lib/binance/futures";
+import { fetchKlines, fetchLivePrices } from "@/lib/binance/futures";
 import { runMarketScan } from "@/lib/engine/scanner";
 import { getActiveProvider } from "@/lib/binance/futures";
 import {
@@ -116,7 +116,9 @@ export function BotProvider({ children }: { children: ReactNode }) {
   const [hydrated, setHydrated] = useState(false);
   const scanLock = useRef(false);
   const balanceRef = useRef(balance);
+  const positionsRef = useRef(positions);
   balanceRef.current = balance;
+  positionsRef.current = positions;
 
   useEffect(() => {
     const saved = loadState();
@@ -197,18 +199,18 @@ export function BotProvider({ children }: { children: ReactNode }) {
     }
   }, [addLog]);
 
-  const processAutoTrades = useCallback((
+  const processAutoTrades = useCallback(async (
     newSignals: ScanSignal[],
     currentPositions: Position[],
     currentWallet: WalletState,
-    scanCompletedAt: number
-  ): Position[] => {
+    scanCompletedAt: number,
+    livePrices: Record<string, number>
+  ): Promise<Position[]> => {
     if (mode === "OFF" || risk.killSwitch) return currentPositions;
 
     const openSymbols = new Set(currentPositions.filter((p) => p.status === "OPEN").map((p) => p.symbol));
     const updated = [...currentPositions];
     const queue: ScanSignal[] = [];
-    const blocked = new Map<string, string>();
     let filled = 0;
     const slotsAvailable = risk.maxOpenPositions - updated.filter((p) => p.status === "OPEN").length;
 
@@ -217,21 +219,25 @@ export function BotProvider({ children }: { children: ReactNode }) {
       const openCount = updated.filter((p) => p.status === "OPEN").length;
       const check = canOpenPosition(risk, openCount, signal, currentWallet);
       if (!check.ok) {
-        blocked.set(signal.symbol, check.reason ?? "blocked");
         queue.push(signal);
         continue;
       }
 
+      const executionPrice = livePrices[signal.symbol] ?? signal.price;
       const executedAt = Date.now();
-      const pos = openPaperPosition(signal, risk, currentWallet, signal.scannedAt, executedAt);
+      const pos = openPaperPosition(signal, risk, currentWallet, executionPrice, signal.scannedAt, executedAt);
       updated.push(pos);
       openSymbols.add(signal.symbol);
       const latency = executedAt - scanCompletedAt;
       setLastExecutionLatencyMs(latency);
 
+      const scanRef = signal.price;
+      const slipPct = scanRef > 0 ? Math.abs((executionPrice - scanRef) / scanRef) * 100 : 0;
+      const slipNote = slipPct > 0.05 ? ` (scan ref $${scanRef.toFixed(4)}, slip ${slipPct.toFixed(2)}%)` : "";
+
       addLog("trade", "execution",
-        `ENTRY ${signal.direction} ${signal.symbol} @ $${signal.price.toFixed(4)} | margin $${pos.marginUsed.toFixed(2)} × ${pos.leverage}x = $${pos.notionalValue.toFixed(2)} notional | conf ${signal.confidence}% | latency ${latency}ms`,
-        { signal, position: pos, breakdown: signal.confidenceBreakdown }
+        `ENTRY ${signal.direction} ${signal.symbol} @ $${executionPrice.toFixed(4)}${slipNote} | margin $${pos.marginUsed.toFixed(2)} × ${pos.leverage}x | conf ${signal.confidence}% | PnL 0.00% at fill`,
+        { signal, position: pos, executionPrice, scanReferencePrice: scanRef }
       );
 
       setValidation((v) => ({ ...v, correctEntry: true, liveSignals: true }));
@@ -287,35 +293,37 @@ export function BotProvider({ children }: { children: ReactNode }) {
       const blocked = new Map<string, string>();
       recordConfidenceLog(enriched, blocked);
 
-      const priceMap: Record<string, number> = {};
-      for (const s of enriched) priceMap[s.symbol] = s.price;
-
-      const open = positions.filter((p) => p.status === "OPEN");
+      const open = positionsRef.current.filter((p) => p.status === "OPEN");
       const candles = await fetchCandlesForOpen(open);
+
+      const priceMap: Record<string, number> = {};
       for (const [sym, c] of Object.entries(candles)) priceMap[sym] = c.close;
 
-      setPositions((prev) => {
-        let updated = updatePositionPrices(prev, priceMap);
-        const { updated: afterExit, closed } = checkExits(updated, candles);
-        updated = afterExit;
+      const openSymbols = new Set(open.map((p) => p.symbol));
+      const tradeCandidates = enriched.filter((s) => !openSymbols.has(s.symbol));
+      const livePrices = await fetchLivePrices(tradeCandidates.map((s) => s.symbol));
 
-        const closedPnl = closed.reduce((s, c) => s + c.pnlUsd, 0);
-        const effectiveBalance = balanceRef.current + closedPnl;
-        if (closed.length > 0) handleClosed(closed);
+      let updated = updatePositionPrices(positionsRef.current, priceMap);
+      const { updated: afterExit, closed } = checkExits(updated, candles);
 
-        if (mode !== "OFF" && !risk.killSwitch) {
-          const w = buildWallet(effectiveBalance, risk.initialBalance, updated);
-          updated = processAutoTrades(enriched, updated, w, scanCompletedAt);
-        }
-        return updated;
-      });
+      const closedPnl = closed.reduce((s, c) => s + c.pnlUsd, 0);
+      const effectiveBalance = balanceRef.current + closedPnl;
+      if (closed.length > 0) handleClosed(closed);
+
+      if (mode !== "OFF" && !risk.killSwitch) {
+        const w = buildWallet(effectiveBalance, risk.initialBalance, afterExit);
+        const withNew = await processAutoTrades(enriched, afterExit, w, scanCompletedAt, livePrices);
+        setPositions(withNew);
+      } else {
+        setPositions(afterExit);
+      }
     } catch (err) {
       addLog("error", "error", `Scan failed: ${err instanceof Error ? err.message : "unknown"}`);
     } finally {
       setIsScanning(false);
       scanLock.current = false;
     }
-  }, [risk.minConfidence, risk.killSwitch, mode, addLog, recordConfidenceLog, handleClosed, processAutoTrades, positions]);
+  }, [risk.minConfidence, risk.killSwitch, mode, addLog, recordConfidenceLog, handleClosed, processAutoTrades]);
 
   useEffect(() => {
     if (!botRunning) return;

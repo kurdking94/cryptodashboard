@@ -167,9 +167,10 @@ export async function analyzePair(
   enabledStrategyIds: Set<string>,
   btcChange24h?: number
 ): Promise<AnalyzedSignal | null> {
-  const [candlesByTf, marketCtx] = await Promise.all([
+  const [candlesByTf, marketCtx, latest1m] = await Promise.all([
     Promise.all(SCAN_TIMEFRAMES.map(async (tf) => [tf, await fetchCandlesForScanTimeframe(ticker.symbol, tf)] as const)),
     fetchMarketContext(ticker.symbol),
+    fetchKlines(ticker.symbol, "1m", 2),
   ]);
 
   const candleMap = Object.fromEntries(candlesByTf) as Record<ScanTimeframe, Candle[]>;
@@ -209,11 +210,13 @@ export async function analyzePair(
 
   if (breakdown.final < 40) return null;
 
+  const livePrice = latest1m.length ? latest1m[latest1m.length - 1].close : ticker.price;
+
   return {
     symbol: ticker.symbol,
     direction,
     confidence: breakdown.final,
-    price: ticker.price,
+    price: livePrice,
     change24h: ticker.change24h,
     volume24h: ticker.volume24h,
     quoteVolume24h: ticker.quoteVolume24h,

@@ -161,6 +161,20 @@ const TF_MAP: Record<string, string> = {
   "45m": "15m", "1m": "1m", "5m": "5m", "15m": "15m", "1h": "1h", "4h": "4h",
 };
 
+export async function fetchLivePrices(symbols: string[]): Promise<Record<string, number>> {
+  const unique = [...new Set(symbols)];
+  const map: Record<string, number> = {};
+
+  await Promise.allSettled(
+    unique.map(async (symbol) => {
+      const kl = await fetchKlines(symbol, "1m", 2);
+      if (kl.length) map[symbol] = kl[kl.length - 1].close;
+    })
+  );
+
+  return map;
+}
+
 export function intervalFor(tf: string): string {
   return TF_MAP[tf] ?? "15m";
 }

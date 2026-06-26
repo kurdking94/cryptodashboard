@@ -187,26 +187,27 @@ export function openPaperPosition(
   signal: ScanSignal,
   risk: RiskSettings,
   wallet: WalletState,
+  executionPrice: number,
   signalDetectedAt: number,
   executedAt: number
 ): Position {
   const marginUsed = calcMargin(wallet.balance, risk.positionSizePercent);
   const leverage = risk.maxLeverage;
   const notionalValue = marginUsed * leverage;
-  const { takeProfits, stopLoss } = calcTpLevels(signal.price, signal.direction, signal.volatility);
+  const { takeProfits, stopLoss } = calcTpLevels(executionPrice, signal.direction, signal.volatility);
 
   return {
     id: `${signal.symbol}-${executedAt}`,
     symbol: signal.symbol,
     direction: signal.direction,
-    entryPrice: signal.price,
-    currentPrice: signal.price,
+    entryPrice: executionPrice,
+    currentPrice: executionPrice,
     leverage,
     marginUsed,
     notionalValue,
-    takeProfits: signal.takeProfits ?? takeProfits,
-    stopLoss: signal.stopLoss ?? stopLoss,
-    liquidationPrice: calcLiquidationPrice(signal.price, signal.direction, leverage),
+    takeProfits,
+    stopLoss,
+    liquidationPrice: calcLiquidationPrice(executionPrice, signal.direction, leverage),
     pnlPercent: 0,
     pnlUsd: 0,
     confidence: signal.confidence,
