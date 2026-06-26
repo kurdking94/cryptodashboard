@@ -1,6 +1,7 @@
 import type {
   Candle,
   ConfidenceBreakdown,
+  AnalyzedSignal,
   ScanSignal,
   ScanTimeframe,
   StrategyResult,
@@ -165,7 +166,7 @@ export async function analyzePair(
   ticker: MarketTicker,
   enabledStrategyIds: Set<string>,
   btcChange24h?: number
-): Promise<ScanSignal | null> {
+): Promise<AnalyzedSignal | null> {
   const [candlesByTf, marketCtx] = await Promise.all([
     Promise.all(SCAN_TIMEFRAMES.map(async (tf) => [tf, await fetchCandlesForScanTimeframe(ticker.symbol, tf)] as const)),
     fetchMarketContext(ticker.symbol),
@@ -231,7 +232,7 @@ export async function analyzePair(
   };
 }
 
-export function analyzeCandlesReplay(candles: Candle[], enabledIds: Set<string>, atIndex: number): ScanSignal | null {
+export function analyzeCandlesReplay(candles: Candle[], enabledIds: Set<string>, atIndex: number): AnalyzedSignal | null {
   const slice = candles.slice(0, atIndex + 1);
   if (slice.length < 30) return null;
 

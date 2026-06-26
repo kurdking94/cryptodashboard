@@ -2,7 +2,7 @@
 
 import { useBot } from "@/context/BotContext";
 import BotControls from "@/components/layout/BotControls";
-import { StatCard, Badge } from "@/components/shared/ui";
+import { StatCard, Badge, fmtPrice } from "@/components/shared/ui";
 
 function ValidationRow({ label, pass }: { label: string; pass: boolean }) {
   return (
@@ -16,7 +16,7 @@ function ValidationRow({ label, pass }: { label: string; pass: boolean }) {
 export default function OverviewPage() {
   const {
     mode, isScanning, lastScanAt, scanLatencyMs, lastExecutionLatencyMs,
-    pairsScanned, signals, positions, wallet, scoreboard, risk, validation, dataProvider,
+    pairsScanned, signals, signalHistory, positions, wallet, scoreboard, risk, validation, dataProvider,
   } = useBot();
 
   const open = positions.filter((p) => p.status === "OPEN");
@@ -77,23 +77,25 @@ export default function OverviewPage() {
         <div className="bg-gray-900 border border-gray-800 rounded-xl overflow-hidden lg:col-span-2">
           <div className="px-4 py-3 border-b border-gray-800 flex justify-between">
             <h2 className="text-sm font-bold">Live Signal Feed</h2>
-            <span className="text-xs text-gray-500">{signals.length} signals · {pairsScanned} scanned</span>
+            <span className="text-xs text-gray-500">{signals.length} live · {signalHistory.length} in history · {pairsScanned} scanned</span>
           </div>
           {topSignals.length === 0 ? (
             <p className="p-6 text-center text-gray-500 text-sm">Click Scan Now or Start Bot</p>
           ) : (
             <div className="divide-y divide-gray-800">
-              {topSignals.map((s, i) => (
-                <div key={s.symbol} className="px-4 py-3">
+              {topSignals.map((s) => (
+                <div key={s.id} className="px-4 py-3">
                   <div className="flex items-center justify-between">
                     <div>
-                      <span className="text-gray-500 text-xs">#{i + 1}</span>
-                      <span className="font-bold text-sm ml-2">{s.symbol.replace("USDT", "")}</span>
+                      <span className="font-bold text-sm">{s.symbol.replace("USDT", "")}</span>
                       <Badge color={s.direction === "LONG" ? "green" : "red"}>{s.direction}</Badge>
                     </div>
                     <p className="text-lg font-bold text-blue-400">{s.confidence}%</p>
                   </div>
-                  <p className="text-[10px] text-gray-500 mt-1">{s.rankingReason}</p>
+                  <p className="text-[10px] text-gray-500 mt-1">
+                    TP1–4 ${fmtPrice(s.takeProfits.tp1)} / ${fmtPrice(s.takeProfits.tp2)} / ${fmtPrice(s.takeProfits.tp3)} / ${fmtPrice(s.takeProfits.tp4)} · SL ${fmtPrice(s.stopLoss)}
+                  </p>
+                  <p className="text-[10px] text-gray-600 mt-0.5">{s.rankingReason}</p>
                 </div>
               ))}
             </div>

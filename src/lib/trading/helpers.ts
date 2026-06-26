@@ -1,6 +1,28 @@
 import { v4 as uuidv4 } from "uuid";
 import { STRATEGY_REGISTRY } from "@/lib/strategies";
-import type { BotLog, LogCategory, StrategyHealth } from "@/types/trading";
+import { calcTpLevels } from "@/lib/risk/manager";
+import type { AnalyzedSignal, BotLog, LogCategory, Position, ScanSignal, StrategyHealth } from "@/types/trading";
+
+export function enrichScanSignal(signal: AnalyzedSignal, scanId: string): ScanSignal {
+  const { takeProfits, stopLoss } = calcTpLevels(signal.price, signal.direction, signal.volatility);
+  return {
+    ...signal,
+    id: uuidv4(),
+    scanId,
+    takeProfits,
+    stopLoss,
+  };
+}
+
+export function migratePosition(p: Position): Position {
+  if (p.takeProfits) return p;
+  const { takeProfits, stopLoss } = calcTpLevels(p.entryPrice, p.direction, 2);
+  return {
+    ...p,
+    takeProfits: p.takeProfit != null ? { ...takeProfits, tp3: p.takeProfit } : takeProfits,
+    stopLoss: p.stopLoss ?? stopLoss,
+  };
+}
 
 export function createLog(
   level: BotLog["level"],

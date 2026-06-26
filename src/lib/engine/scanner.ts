@@ -1,6 +1,6 @@
 import { analyzePair } from "@/lib/engine/analyzer";
 import { fetchTopFuturesTickers } from "@/lib/binance/futures";
-import type { ScanSignal } from "@/types/trading";
+import type { AnalyzedSignal, ScanSignal } from "@/types/trading";
 
 const BATCH_SIZE = 3;
 const SCAN_PAIR_COUNT = 100;
@@ -9,7 +9,7 @@ export async function runMarketScan(
   enabledStrategyIds: Set<string>,
   minConfidence: number,
   onProgress?: (scanned: number, total: number) => void
-): Promise<{ signals: ScanSignal[]; latencyMs: number; pairsScanned: number; errors: string[] }> {
+): Promise<{ signals: AnalyzedSignal[]; latencyMs: number; pairsScanned: number; errors: string[] }> {
   const start = Date.now();
   const errors: string[] = [];
   let tickers;
@@ -27,7 +27,7 @@ export async function runMarketScan(
   const btcTicker = tickers.find((t) => t.symbol === "BTCUSDT");
   const btcChange = btcTicker?.change24h ?? 0;
   const candidates = tickers.slice(0, SCAN_PAIR_COUNT);
-  const signals: ScanSignal[] = [];
+  const signals: AnalyzedSignal[] = [];
 
   for (let i = 0; i < candidates.length; i += BATCH_SIZE) {
     const batch = candidates.slice(i, i + BATCH_SIZE);

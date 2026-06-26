@@ -64,7 +64,16 @@ export interface ConfidenceBreakdown {
   final: number;
 }
 
+export interface TakeProfitLevels {
+  tp1: number;
+  tp2: number;
+  tp3: number;
+  tp4: number;
+}
+
 export interface ScanSignal {
+  id: string;
+  scanId: string;
   symbol: string;
   direction: TradeDirection;
   confidence: number;
@@ -84,7 +93,12 @@ export interface ScanSignal {
   scannedAt: number;
   confidenceBreakdown: ConfidenceBreakdown;
   rankingReason: string;
+  takeProfits: TakeProfitLevels;
+  stopLoss: number;
 }
+
+/** Signal from analyzer before TP levels and IDs are attached */
+export type AnalyzedSignal = Omit<ScanSignal, "id" | "scanId" | "takeProfits" | "stopLoss">;
 
 export interface Position {
   id: string;
@@ -97,8 +111,10 @@ export interface Position {
   marginUsed: number;
   /** Notional = margin × leverage */
   notionalValue: number;
-  takeProfit: number;
+  takeProfits: TakeProfitLevels;
   stopLoss: number;
+  /** @deprecated legacy — use takeProfits.tp3 */
+  takeProfit?: number;
   liquidationPrice: number;
   pnlPercent: number;
   pnlUsd: number;
@@ -192,7 +208,10 @@ export interface BotState {
   scanLatencyMs: number;
   lastExecutionLatencyMs: number;
   pairsScanned: number;
+  /** Latest scan results only */
   signals: ScanSignal[];
+  /** Append-only history — never cleared on new scans */
+  signalHistory: ScanSignal[];
   positions: Position[];
   closedPositions: Position[];
   replacementQueue: ScanSignal[];

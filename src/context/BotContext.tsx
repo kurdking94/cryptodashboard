@@ -21,7 +21,7 @@ import {
 } from "@/lib/risk/manager";
 import { computeScoreboard } from "@/lib/trading/scoreboard";
 import { runReplay, type ReplayResult } from "@/lib/trading/replay";
-import { createLog, INITIAL_STRATEGY_HEALTH, updateStrategyHealth } from "@/lib/trading/helpers";
+import { createLog, enrichScanSignal, INITIAL_STRATEGY_HEALTH, migratePosition, updateStrategyHealth } from "@/lib/trading/helpers";
 import { buildWallet } from "@/lib/wallet";
 import type {
   BotLog,
@@ -39,8 +39,9 @@ import type {
 import { DEFAULT_RISK, INITIAL_BALANCE } from "@/types/trading";
 import { v4 as uuidv4 } from "uuid";
 
-const STORAGE_KEY = "futures_bot_v2";
+const STORAGE_KEY = "futures_bot_v3";
 const SCAN_INTERVAL_MS = 5 * 60 * 1000; // 5 minutes
+const MAX_SIGNAL_HISTORY = 5000;
 
 interface BotContextValue extends BotState {
   wallet: WalletState;
@@ -81,6 +82,7 @@ function saveState(state: BotState & { balance: number }) {
       strategyHealth: state.strategyHealth,
       logs: state.logs.slice(-400),
       confidenceLog: state.confidenceLog.slice(-100),
+      signalHistory: state.signalHistory.slice(-MAX_SIGNAL_HISTORY),
       balance: state.balance,
       validation: state.validation,
       lastReplacementAt: state.lastReplacementAt,
@@ -96,6 +98,7 @@ export function BotProvider({ children }: { children: ReactNode }) {
   const [lastExecutionLatencyMs, setLastExecutionLatencyMs] = useState(0);
   const [pairsScanned, setPairsScanned] = useState(0);
   const [signals, setSignals] = useState<ScanSignal[]>([]);
+  const [signalHistory, setSignalHistory] = useState<ScanSignal[]>([]);
   const [positions, setPositions] = useState<Position[]>([]);
   const [closedPositions, setClosedPositions] = useState<Position[]>([]);
   const [replacementQueue, setReplacementQueue] = useState<ScanSignal[]>([]);
@@ -119,12 +122,13 @@ export function BotProvider({ children }: { children: ReactNode }) {
     const saved = loadState();
     /* eslint-disable react-hooks/set-state-in-effect -- one-time localStorage hydration */
     if (saved.mode) setModeState(saved.mode);
-    if (saved.positions) setPositions(saved.positions);
+    if (saved.positions) setPositions(saved.positions.map(migratePosition));
     if (saved.closedPositions) setClosedPositions(saved.closedPositions);
     if (saved.risk) setRisk({ ...DEFAULT_RISK, ...saved.risk });
     if (saved.strategyHealth) setStrategyHealth(saved.strategyHealth);
     if (saved.logs) setLogs(saved.logs);
     if (saved.confidenceLog) setConfidenceLog(saved.confidenceLog);
+    if (saved.signalHistory) setSignalHistory(saved.signalHistory);
     if (saved.balance != null) setBalance(saved.balance);
     else if (saved.paperBalance != null) setBalance(saved.paperBalance);
     if (saved.validation) setValidation(saved.validation);
@@ -152,10 +156,10 @@ export function BotProvider({ children }: { children: ReactNode }) {
   const persist = useCallback(() => {
     saveState({
       mode, isScanning, lastScanAt, scanLatencyMs, lastExecutionLatencyMs, pairsScanned,
-      signals, positions, closedPositions, replacementQueue, risk, strategyHealth,
+      signals, signalHistory, positions, closedPositions, replacementQueue, risk, strategyHealth,
       logs, confidenceLog, wallet, scoreboard, validation, lastReplacementAt, balance,
     });
-  }, [mode, isScanning, lastScanAt, scanLatencyMs, lastExecutionLatencyMs, pairsScanned, signals, positions, closedPositions, replacementQueue, risk, strategyHealth, logs, confidenceLog, wallet, scoreboard, validation, lastReplacementAt, balance]);
+  }, [mode, isScanning, lastScanAt, scanLatencyMs, lastExecutionLatencyMs, pairsScanned, signals, signalHistory, positions, closedPositions, replacementQueue, risk, strategyHealth, logs, confidenceLog, wallet, scoreboard, validation, lastReplacementAt, balance]);
 
   useEffect(() => { if (hydrated) persist(); }, [hydrated, persist]);
 
@@ -265,7 +269,11 @@ export function BotProvider({ children }: { children: ReactNode }) {
       const result = await runMarketScan(enabledIds.current, risk.minConfidence, (n) => setPairsScanned(n));
       const scanCompletedAt = Date.now();
 
-      setSignals(result.signals);
+      const scanId = uuidv4();
+      const enriched = result.signals.map((s) => enrichScanSignal(s, scanId));
+
+      setSignals(enriched);
+      setSignalHistory((prev) => [...enriched, ...prev].slice(0, MAX_SIGNAL_HISTORY));
       setScanLatencyMs(result.latencyMs);
       setLastScanAt(scanCompletedAt);
       setDataProvider(getActiveProvider());
@@ -277,10 +285,10 @@ export function BotProvider({ children }: { children: ReactNode }) {
       }
 
       const blocked = new Map<string, string>();
-      recordConfidenceLog(result.signals, blocked);
+      recordConfidenceLog(enriched, blocked);
 
       const priceMap: Record<string, number> = {};
-      for (const s of result.signals) priceMap[s.symbol] = s.price;
+      for (const s of enriched) priceMap[s.symbol] = s.price;
 
       const open = positions.filter((p) => p.status === "OPEN");
       const candles = await fetchCandlesForOpen(open);
@@ -297,7 +305,7 @@ export function BotProvider({ children }: { children: ReactNode }) {
 
         if (mode !== "OFF" && !risk.killSwitch) {
           const w = buildWallet(effectiveBalance, risk.initialBalance, updated);
-          updated = processAutoTrades(result.signals, updated, w, scanCompletedAt);
+          updated = processAutoTrades(enriched, updated, w, scanCompletedAt);
         }
         return updated;
       });
@@ -365,6 +373,7 @@ export function BotProvider({ children }: { children: ReactNode }) {
     setPositions([]);
     setClosedPositions([]);
     setSignals([]);
+    setSignalHistory([]);
     setReplacementQueue([]);
     setRisk((r) => ({ ...DEFAULT_RISK, killSwitch: false, dailyLossUsd: 0 }));
     setStrategyHealth(INITIAL_STRATEGY_HEALTH);
@@ -398,7 +407,7 @@ export function BotProvider({ children }: { children: ReactNode }) {
   return (
     <BotContext.Provider value={{
       mode, isScanning, lastScanAt, scanLatencyMs, lastExecutionLatencyMs, pairsScanned,
-      signals, positions, closedPositions, replacementQueue, risk, strategyHealth,
+      signals, signalHistory, positions, closedPositions, replacementQueue, risk, strategyHealth,
       logs, confidenceLog, wallet, scoreboard, validation, lastReplacementAt, dataProvider,
       startBot, stopBot, setMode, runScanNow, runReplay: runReplayMode,
       closePosition, killAll, resetWallet, updateRisk, toggleStrategy, addLog,

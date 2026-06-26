@@ -4,6 +4,7 @@ import type {
   PositionStatus,
   RiskSettings,
   ScanSignal,
+  TakeProfitLevels,
   TradeDirection,
   WalletState,
 } from "@/types/trading";
@@ -19,16 +20,56 @@ export function calcLiquidationPrice(
   return entry * (1 + margin * 0.9);
 }
 
+/** Four take-profit levels; positions auto-close at TP3. */
+export function calcTpLevels(
+  entry: number,
+  direction: TradeDirection,
+  volatility: number
+): { takeProfits: TakeProfitLevels; stopLoss: number } {
+  const base = Math.max(0.6, Math.min(2.5, volatility * 0.35));
+  const tpPct = [base * 0.4, base * 0.8, base * 1.2, base * 1.8];
+  const slPct = base * 0.72;
+
+  if (direction === "LONG") {
+    return {
+      takeProfits: {
+        tp1: entry * (1 + tpPct[0] / 100),
+        tp2: entry * (1 + tpPct[1] / 100),
+        tp3: entry * (1 + tpPct[2] / 100),
+        tp4: entry * (1 + tpPct[3] / 100),
+      },
+      stopLoss: entry * (1 - slPct / 100),
+    };
+  }
+
+  return {
+    takeProfits: {
+      tp1: entry * (1 - tpPct[0] / 100),
+      tp2: entry * (1 - tpPct[1] / 100),
+      tp3: entry * (1 - tpPct[2] / 100),
+      tp4: entry * (1 - tpPct[3] / 100),
+    },
+    stopLoss: entry * (1 + slPct / 100),
+  };
+}
+
+/** @deprecated use calcTpLevels */
 export function calcTpSl(
   entry: number,
   direction: TradeDirection,
   volatility: number
 ): { tp: number; sl: number } {
-  const move = Math.max(0.8, Math.min(3, volatility * 0.4));
-  if (direction === "LONG") {
-    return { tp: entry * (1 + move / 100), sl: entry * (1 - move / 100 * 0.6) };
+  const { takeProfits, stopLoss } = calcTpLevels(entry, direction, volatility);
+  return { tp: takeProfits.tp3, sl: stopLoss };
+}
+
+export function getPositionTpLevels(p: Position): TakeProfitLevels {
+  if (p.takeProfits) return p.takeProfits;
+  const fallback = calcTpLevels(p.entryPrice, p.direction, 2);
+  if (p.takeProfit != null) {
+    return { ...fallback.takeProfits, tp3: p.takeProfit };
   }
-  return { tp: entry * (1 - move / 100), sl: entry * (1 + move / 100 * 0.6) };
+  return fallback.takeProfits;
 }
 
 export function calcPnl(
@@ -100,6 +141,7 @@ export function checkExits(
     const high = candle?.high ?? p.currentPrice;
     const low = candle?.low ?? p.currentPrice;
     const close = candle?.close ?? p.currentPrice;
+    const tp = getPositionTpLevels(p);
 
     let status: PositionStatus = "OPEN";
     let exitPrice = close;
@@ -109,17 +151,17 @@ export function checkExits(
       if (low <= p.liquidationPrice) {
         status = "LIQUIDATED"; exitPrice = p.liquidationPrice; exitReason = "Liquidation hit";
       } else if (low <= p.stopLoss) {
-        status = "CLOSED_SL"; exitPrice = p.stopLoss; exitReason = "Stop loss hit (candle low)";
-      } else if (high >= p.takeProfit) {
-        status = "CLOSED_TP"; exitPrice = p.takeProfit; exitReason = "Take profit hit (candle high)";
+        status = "CLOSED_SL"; exitPrice = p.stopLoss; exitReason = "Stop loss hit";
+      } else if (high >= tp.tp3) {
+        status = "CLOSED_TP"; exitPrice = tp.tp3; exitReason = "Take profit 3 hit";
       }
     } else {
       if (high >= p.liquidationPrice) {
         status = "LIQUIDATED"; exitPrice = p.liquidationPrice; exitReason = "Liquidation hit";
       } else if (high >= p.stopLoss) {
-        status = "CLOSED_SL"; exitPrice = p.stopLoss; exitReason = "Stop loss hit (candle high)";
-      } else if (low <= p.takeProfit) {
-        status = "CLOSED_TP"; exitPrice = p.takeProfit; exitReason = "Take profit hit (candle low)";
+        status = "CLOSED_SL"; exitPrice = p.stopLoss; exitReason = "Stop loss hit";
+      } else if (low <= tp.tp3) {
+        status = "CLOSED_TP"; exitPrice = tp.tp3; exitReason = "Take profit 3 hit";
       }
     }
 
@@ -151,7 +193,7 @@ export function openPaperPosition(
   const marginUsed = calcMargin(wallet.balance, risk.positionSizePercent);
   const leverage = risk.maxLeverage;
   const notionalValue = marginUsed * leverage;
-  const { tp, sl } = calcTpSl(signal.price, signal.direction, signal.volatility);
+  const { takeProfits, stopLoss } = calcTpLevels(signal.price, signal.direction, signal.volatility);
 
   return {
     id: `${signal.symbol}-${executedAt}`,
@@ -162,8 +204,8 @@ export function openPaperPosition(
     leverage,
     marginUsed,
     notionalValue,
-    takeProfit: tp,
-    stopLoss: sl,
+    takeProfits: signal.takeProfits ?? takeProfits,
+    stopLoss: signal.stopLoss ?? stopLoss,
     liquidationPrice: calcLiquidationPrice(signal.price, signal.direction, leverage),
     pnlPercent: 0,
     pnlUsd: 0,
