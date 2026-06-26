@@ -16,7 +16,7 @@ const NAV = [
 
 export default function Sidebar() {
   const pathname = usePathname();
-  const { mode, isScanning } = useBot();
+  const { mode, isScanning, dataProvider } = useBot();
   const running = isScanning;
 
   return (
@@ -62,6 +62,7 @@ export default function Sidebar() {
           <span className={`w-2 h-2 rounded-full ${running ? "bg-green-400 animate-pulse" : "bg-gray-600"}`} />
           <span className="text-gray-400">{running ? "Scanning…" : "Idle"}</span>
         </div>
+        <div className="text-[10px] text-gray-600">Data: {dataProvider}</div>
       </div>
     </aside>
   );

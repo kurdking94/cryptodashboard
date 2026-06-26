@@ -12,6 +12,7 @@ import {
 } from "react";
 import { fetchKlines } from "@/lib/binance/futures";
 import { runMarketScan } from "@/lib/engine/scanner";
+import { getActiveProvider } from "@/lib/binance/futures";
 import {
   canOpenPosition,
   checkExits,
@@ -43,6 +44,7 @@ const SCAN_INTERVAL_MS = 45_000;
 
 interface BotContextValue extends BotState {
   wallet: WalletState;
+  dataProvider: string;
   startBot: () => void;
   stopBot: () => void;
   setMode: (mode: BotMode) => void;
@@ -106,6 +108,7 @@ export function BotProvider({ children }: { children: ReactNode }) {
     liveSignals: false, confidenceRanking: false, correctEntry: false, correctExit: false, replacement: false,
   });
   const [lastReplacementAt, setLastReplacementAt] = useState<number>();
+  const [dataProvider, setDataProvider] = useState("okx");
   const [botRunning, setBotRunning] = useState(false);
   const [hydrated, setHydrated] = useState(false);
   const scanLock = useRef(false);
@@ -263,6 +266,7 @@ export function BotProvider({ children }: { children: ReactNode }) {
       setSignals(result.signals);
       setScanLatencyMs(result.latencyMs);
       setLastScanAt(scanCompletedAt);
+      setDataProvider(getActiveProvider());
       setValidation((v) => ({ ...v, liveSignals: result.signals.length > 0 }));
 
       addLog("signal", "signal", `Scan complete: ${result.signals.length} signals from ${result.pairsScanned} pairs (${result.latencyMs}ms)`);
@@ -393,7 +397,7 @@ export function BotProvider({ children }: { children: ReactNode }) {
     <BotContext.Provider value={{
       mode, isScanning, lastScanAt, scanLatencyMs, lastExecutionLatencyMs, pairsScanned,
       signals, positions, closedPositions, replacementQueue, risk, strategyHealth,
-      logs, confidenceLog, wallet, scoreboard, validation, lastReplacementAt,
+      logs, confidenceLog, wallet, scoreboard, validation, lastReplacementAt, dataProvider,
       startBot, stopBot, setMode, runScanNow, runReplay: runReplayMode,
       closePosition, killAll, resetWallet, updateRisk, toggleStrategy, addLog,
       executionLogs, errorLogs,

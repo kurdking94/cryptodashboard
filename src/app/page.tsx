@@ -16,7 +16,7 @@ function ValidationRow({ label, pass }: { label: string; pass: boolean }) {
 export default function OverviewPage() {
   const {
     mode, isScanning, lastScanAt, scanLatencyMs, lastExecutionLatencyMs,
-    pairsScanned, signals, positions, wallet, scoreboard, risk, validation,
+    pairsScanned, signals, positions, wallet, scoreboard, risk, validation, dataProvider,
   } = useBot();
 
   const open = positions.filter((p) => p.status === "OPEN");
@@ -29,7 +29,7 @@ export default function OverviewPage() {
         <div>
           <h1 className="text-xl font-bold">Paper Simulator</h1>
           <p className="text-xs text-gray-500 mt-0.5">
-            ${risk.initialBalance} wallet · {risk.positionSizePercent}% per trade · {risk.maxLeverage}x leverage · auto-scan every 45s
+            ${risk.initialBalance} wallet · {risk.positionSizePercent}% per trade · {risk.maxLeverage}x leverage · data via {dataProvider}
           </p>
         </div>
         <BotControls />
