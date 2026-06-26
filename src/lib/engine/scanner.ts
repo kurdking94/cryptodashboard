@@ -2,7 +2,7 @@ import { analyzePair } from "@/lib/engine/analyzer";
 import { fetchTopFuturesTickers } from "@/lib/binance/futures";
 import type { ScanSignal } from "@/types/trading";
 
-const BATCH_SIZE = 5;
+const BATCH_SIZE = 3;
 const SCAN_PAIR_COUNT = 100;
 
 export async function runMarketScan(

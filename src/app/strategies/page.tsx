@@ -7,11 +7,14 @@ export default function StrategiesPage() {
   const { strategyHealth, signals, toggleStrategy } = useBot();
 
   const latestByStrategy = (id: string) => {
+    let best: (typeof signals)[0]["strategies"][0] | null = null;
     for (const sig of signals) {
-      const s = sig.strategies.find((st) => st.id === id);
-      if (s && s.direction !== "NEUTRAL") return s;
+      for (const s of sig.strategies) {
+        if (s.id !== id || s.direction === "NEUTRAL") continue;
+        if (!best || s.confidence > best.confidence) best = s;
+      }
     }
-    return null;
+    return best;
   };
 
   const categories = [
@@ -49,7 +52,11 @@ export default function StrategiesPage() {
                       <div className="flex items-center gap-2 flex-wrap">
                         <h3 className="font-bold text-sm">{s.name}</h3>
                         <Badge color={s.enabled ? "green" : "gray"}>{s.enabled ? "ON" : "OFF"}</Badge>
-                        {live && <Badge color={live.direction === "LONG" ? "green" : "red"}>{live.direction} {live.confidence.toFixed(0)}%</Badge>}
+                        {live && (
+                          <Badge color={live.direction === "LONG" ? "green" : "red"}>
+                            {live.direction} {live.confidence.toFixed(0)}%{live.timeframe ? ` · ${live.timeframe}` : ""}
+                          </Badge>
+                        )}
                       </div>
                       <button onClick={() => toggleStrategy(s.id)}
                         className={`px-3 py-1 rounded-lg text-xs font-semibold ${s.enabled ? "bg-red-900/40 text-red-400" : "bg-green-900/40 text-green-400"}`}>

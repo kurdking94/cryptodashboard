@@ -2,7 +2,9 @@ export type BotMode = "OFF" | "PAPER" | "LIVE";
 export type TradeDirection = "LONG" | "SHORT";
 export type PositionStatus = "OPEN" | "CLOSED_TP" | "CLOSED_SL" | "CLOSED_MANUAL" | "LIQUIDATED";
 export type TrendBias = "BULLISH" | "BEARISH" | "NEUTRAL";
-export type Timeframe = "1m" | "5m" | "15m" | "1h" | "4h";
+/** Timeframes used for multi-TF strategy scans */
+export type ScanTimeframe = "45m" | "1h" | "4h";
+export type Timeframe = ScanTimeframe;
 export type LogCategory = "execution" | "confidence" | "error" | "signal" | "system";
 
 export interface Candle {
@@ -33,6 +35,7 @@ export interface StrategyResult {
   confidence: number;
   reason: string;
   enabled: boolean;
+  timeframe?: ScanTimeframe;
 }
 
 export interface StrategyHealth {
@@ -219,4 +222,4 @@ export const DEFAULT_RISK: RiskSettings = {
   minVolume24h: 5_000_000,
 };
 
-export const TIMEFRAMES: Timeframe[] = ["1m", "5m", "15m", "1h", "4h"];
+export const TIMEFRAMES: Timeframe[] = ["45m", "1h", "4h"];

@@ -168,7 +168,9 @@ export function BotProvider({ children }: { children: ReactNode }) {
       confidence: s.confidence,
       direction: s.direction,
       breakdown: s.confidenceBreakdown,
-      agreeing: s.strategies.filter((st) => st.direction === s.direction).map((st) => st.name),
+      agreeing: s.strategies
+        .filter((st) => st.direction === s.direction)
+        .map((st) => `${st.name}${st.timeframe ? ` (${st.timeframe})` : ""}`),
       blocked: blocked.get(s.symbol),
       rankingReason: s.rankingReason,
     }));
@@ -257,7 +259,7 @@ export function BotProvider({ children }: { children: ReactNode }) {
     if (scanLock.current) return;
     scanLock.current = true;
     setIsScanning(true);
-    addLog("info", "signal", "Market scan started — top 100 futures pairs");
+    addLog("info", "signal", "Market scan started — top 100 pairs · all strategies on 45m, 1h, 4h");
 
     try {
       const result = await runMarketScan(enabledIds.current, risk.minConfidence, (n) => setPairsScanned(n));

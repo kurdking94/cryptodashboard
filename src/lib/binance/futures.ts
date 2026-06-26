@@ -158,7 +158,7 @@ export async function fetchMarketContext(symbol: string): Promise<MarketContext>
 }
 
 const TF_MAP: Record<string, string> = {
-  "1m": "1m", "5m": "5m", "15m": "15m", "1h": "1h", "4h": "4h",
+  "45m": "15m", "1m": "1m", "5m": "5m", "15m": "15m", "1h": "1h", "4h": "4h",
 };
 
 export function intervalFor(tf: string): string {

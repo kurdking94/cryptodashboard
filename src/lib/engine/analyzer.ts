@@ -1,9 +1,25 @@
-import type { Candle, ConfidenceBreakdown, ScanSignal, StrategyResult, Timeframe, TrendBias } from "@/types/trading";
+import type {
+  Candle,
+  ConfidenceBreakdown,
+  ScanSignal,
+  ScanTimeframe,
+  StrategyResult,
+  Timeframe,
+  TrendBias,
+} from "@/types/trading";
 import { runAllStrategies } from "@/lib/strategies";
 import type { StrategyContext } from "@/lib/strategies/types";
-import { trendFromCloses, volatilityPercent } from "@/lib/indicators";
+import { resampleCandles, trendFromCloses, volatilityPercent } from "@/lib/indicators";
 import { fetchKlines, fetchMarketContext, intervalFor } from "@/lib/binance/futures";
 import type { MarketTicker } from "@/types/trading";
+
+export const SCAN_TIMEFRAMES: ScanTimeframe[] = ["45m", "1h", "4h"];
+
+const MIN_BARS: Record<ScanTimeframe, number> = {
+  "45m": 30,
+  "1h": 30,
+  "4h": 30,
+};
 
 export function whaleScoreFromCandles(candles: Candle[]): number {
   if (candles.length < 20) return 50;
@@ -87,11 +103,16 @@ export function buildRankingReason(
   agreeing: number,
   aligned: StrategyResult[],
   news: number,
-  whale: number
+  whale: number,
+  timeframes?: Record<Timeframe, TrendBias>
 ): string {
-  const names = aligned.slice(0, 4).map((s) => s.name).join(", ");
+  const names = aligned.slice(0, 4).map((s) => `${s.name}${s.timeframe ? ` (${s.timeframe})` : ""}`).join(", ");
   const more = aligned.length > 4 ? ` +${aligned.length - 4} more` : "";
-  const parts = [`${agreeing} strategies agree (${names}${more})`];
+  const parts = [`${agreeing} strategy signals agree (${names}${more})`];
+  if (timeframes) {
+    const tfSummary = SCAN_TIMEFRAMES.map((tf) => `${tf} ${timeframes[tf]}`).join(", ");
+    parts.push(tfSummary);
+  }
   if (breakdown.agreementBonus > 0) parts.push(`+${breakdown.agreementBonus} agreement`);
   if (breakdown.volumeBonus > 0) parts.push(`+${breakdown.volumeBonus} volume`);
   if (breakdown.whaleBonus > 0) parts.push(`+${breakdown.whaleBonus} whale (${whale})`);
@@ -99,59 +120,91 @@ export function buildRankingReason(
   return parts.join(" · ");
 }
 
+async function fetchCandlesForScanTimeframe(symbol: string, tf: ScanTimeframe): Promise<Candle[]> {
+  if (tf === "45m") {
+    const m15 = await fetchKlines(symbol, "15m", 360);
+    return resampleCandles(m15, 3);
+  }
+  return fetchKlines(symbol, intervalFor(tf), 120);
+}
+
+function runStrategiesOnTimeframe(
+  candles: Candle[],
+  tf: ScanTimeframe,
+  baseCtx: Omit<StrategyContext, "candles">,
+  enabledStrategyIds: Set<string>
+): StrategyResult[] {
+  if (candles.length < MIN_BARS[tf]) return [];
+
+  return runAllStrategies({ ...baseCtx, candles }).map((r) => ({
+    ...r,
+    timeframe: tf,
+    enabled: enabledStrategyIds.has(r.id),
+  }));
+}
+
+function htfAdjustment(
+  direction: "LONG" | "SHORT",
+  timeframes: Record<Timeframe, TrendBias>
+): number {
+  let penalty = 0;
+  let bonus = 0;
+
+  for (const tf of SCAN_TIMEFRAMES) {
+    const bias = timeframes[tf];
+    if (direction === "LONG" && bias === "BEARISH") penalty += 4;
+    if (direction === "SHORT" && bias === "BULLISH") penalty += 4;
+    if (direction === "LONG" && bias === "BULLISH") bonus += 2;
+    if (direction === "SHORT" && bias === "BEARISH") bonus += 2;
+  }
+
+  return Math.max(0, penalty - bonus);
+}
+
 export async function analyzePair(
   ticker: MarketTicker,
   enabledStrategyIds: Set<string>,
   btcChange24h?: number
 ): Promise<ScanSignal | null> {
-  const timeframes: Record<Timeframe, TrendBias> = {
-    "1m": "NEUTRAL", "5m": "NEUTRAL", "15m": "NEUTRAL", "1h": "NEUTRAL", "4h": "NEUTRAL",
-  };
-
-  const [klines15, klines1h, marketCtx] = await Promise.all([
-    fetchKlines(ticker.symbol, intervalFor("15m"), 120),
-    fetchKlines(ticker.symbol, intervalFor("1h"), 60),
+  const [candlesByTf, marketCtx] = await Promise.all([
+    Promise.all(SCAN_TIMEFRAMES.map(async (tf) => [tf, await fetchCandlesForScanTimeframe(ticker.symbol, tf)] as const)),
     fetchMarketContext(ticker.symbol),
   ]);
 
-  if (klines15.length < 30) return null;
+  const candleMap = Object.fromEntries(candlesByTf) as Record<ScanTimeframe, Candle[]>;
+  const hasEnoughData = SCAN_TIMEFRAMES.every((tf) => candleMap[tf].length >= MIN_BARS[tf]);
+  if (!hasEnoughData) return null;
 
-  const ctx: StrategyContext = {
-    candles: klines15,
+  const baseCtx: Omit<StrategyContext, "candles"> = {
     ticker,
     btcChange24h,
     ...marketCtx,
   };
 
-  const strategyResults = runAllStrategies(ctx);
-  const filtered = strategyResults.map((r) => ({
-    ...r,
-    enabled: enabledStrategyIds.has(r.id),
-  }));
+  const strategyResults = SCAN_TIMEFRAMES.flatMap((tf) =>
+    runStrategiesOnTimeframe(candleMap[tf], tf, baseCtx, enabledStrategyIds)
+  );
 
-  const { direction, confidence, agreeing, aligned } = combineStrategies(filtered, enabledStrategyIds);
+  const { direction, confidence, agreeing, aligned } = combineStrategies(strategyResults, enabledStrategyIds);
   if (!direction || confidence < 40) return null;
 
-  timeframes["15m"] = trendFromCloses(klines15.map((c) => c.close));
-  timeframes["1h"] = trendFromCloses(klines1h.map((c) => c.close));
-  timeframes["4h"] = timeframes["1h"];
-  timeframes["5m"] = timeframes["15m"];
+  const timeframes = Object.fromEntries(
+    SCAN_TIMEFRAMES.map((tf) => [tf, trendFromCloses(candleMap[tf].map((c) => c.close))])
+  ) as Record<Timeframe, TrendBias>;
 
-  let htfPenalty = 0;
-  const htf = timeframes["1h"];
-  if (direction === "LONG" && htf === "BEARISH") htfPenalty = 8;
-  if (direction === "SHORT" && htf === "BULLISH") htfPenalty = 8;
-
-  const whale = whaleScoreFromCandles(klines15);
+  const htfPenalty = htfAdjustment(direction, timeframes);
+  const primaryCandles = candleMap["45m"];
+  const whale = whaleScoreFromCandles(primaryCandles);
   const news = newsRiskScore(ticker);
   const volConfirm = Math.min(100, (ticker.quoteVolume24h / 50_000_000) * 100);
-  const volQuality = volatilityPercent(klines15);
-  const activeCount = filtered.filter((s) => s.enabled && s.direction !== "NEUTRAL").length;
+  const volQuality = volatilityPercent(primaryCandles);
+  const activeCount = strategyResults.filter((s) => s.enabled && s.direction !== "NEUTRAL").length;
+  const enabledSlots = enabledStrategyIds.size * SCAN_TIMEFRAMES.length;
 
   const avgConf = aligned.reduce((s, r) => s + r.confidence, 0) / aligned.length;
   const baseScore = avgConf * 0.55 + agreeing * 3 + (agreeing / Math.max(activeCount, 1)) * 20;
   const breakdown = buildConfidenceBreakdown(baseScore, agreeing, activeCount, volConfirm, whale, news, htfPenalty);
-  const rankingReason = buildRankingReason(breakdown, agreeing, aligned, news, whale);
+  const rankingReason = buildRankingReason(breakdown, agreeing, aligned, news, whale, timeframes);
 
   if (breakdown.final < 40) return null;
 
@@ -165,9 +218,9 @@ export async function analyzePair(
     quoteVolume24h: ticker.quoteVolume24h,
     spread: ticker.spread,
     volatility: volQuality || ticker.volatility,
-    strategies: filtered,
+    strategies: strategyResults,
     agreeingStrategies: agreeing,
-    totalStrategies: filtered.filter((s) => s.enabled).length,
+    totalStrategies: enabledSlots,
     timeframes,
     newsScore: news,
     whaleScore: whale,
@@ -183,17 +236,22 @@ export function analyzeCandlesReplay(candles: Candle[], enabledIds: Set<string>,
   if (slice.length < 30) return null;
 
   const ctx: StrategyContext = { candles: slice };
-  const strategyResults = runAllStrategies(ctx);
-  const filtered = strategyResults.map((r) => ({ ...r, enabled: enabledIds.has(r.id) }));
-  const { direction, agreeing, aligned } = combineStrategies(filtered, enabledIds);
+  const strategyResults = runAllStrategies(ctx).map((r) => ({ ...r, enabled: enabledIds.has(r.id), timeframe: "45m" as ScanTimeframe }));
+  const { direction, agreeing, aligned } = combineStrategies(strategyResults, enabledIds);
   if (!direction || agreeing < 1) return null;
 
   const last = slice[slice.length - 1];
   const whale = whaleScoreFromCandles(slice);
   const volQuality = volatilityPercent(slice);
-  const activeCount = filtered.filter((s) => s.enabled && s.direction !== "NEUTRAL").length;
+  const activeCount = strategyResults.filter((s) => s.enabled && s.direction !== "NEUTRAL").length;
   const avgConf = aligned.reduce((s, r) => s + r.confidence, 0) / aligned.length;
   const breakdown = buildConfidenceBreakdown(avgConf * 0.55 + agreeing * 3, agreeing, activeCount, 50, whale, 85);
+
+  const timeframes: Record<Timeframe, TrendBias> = {
+    "45m": trendFromCloses(slice.map((c) => c.close)),
+    "1h": "NEUTRAL",
+    "4h": "NEUTRAL",
+  };
 
   return {
     symbol: "REPLAY",
@@ -205,10 +263,10 @@ export function analyzeCandlesReplay(candles: Candle[], enabledIds: Set<string>,
     quoteVolume24h: 0,
     spread: 0,
     volatility: volQuality,
-    strategies: filtered,
+    strategies: strategyResults,
     agreeingStrategies: agreeing,
-    totalStrategies: filtered.filter((s) => s.enabled).length,
-    timeframes: { "1m": "NEUTRAL", "5m": "NEUTRAL", "15m": "NEUTRAL", "1h": "NEUTRAL", "4h": "NEUTRAL" },
+    totalStrategies: enabledIds.size,
+    timeframes,
     newsScore: 85,
     whaleScore: whale,
     volumeConfirmation: 50,

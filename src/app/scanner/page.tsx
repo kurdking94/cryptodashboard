@@ -20,7 +20,7 @@ export default function ScannerPage() {
         <div>
           <h1 className="text-xl font-bold">Market Scanner</h1>
           <p className="text-xs text-gray-500">
-            Top 100 futures by volume · {pairsScanned} analyzed per scan
+            Top 100 futures · all 28 strategies × 45m/1h/4h · {pairsScanned} analyzed per scan
             {lastScanAt && ` · ${new Date(lastScanAt).toLocaleTimeString()} (${scanLatencyMs}ms)`}
           </p>
         </div>

@@ -1,3 +1,5 @@
+import type { Candle } from "@/types/trading";
+
 export function ema(values: number[], period: number): number[] {
   if (values.length === 0) return [];
   const k = 2 / (period + 1);
@@ -188,4 +190,24 @@ export function highest(values: number[], period: number): number {
 
 export function lowest(values: number[], period: number): number {
   return Math.min(...values.slice(-period));
+}
+
+/** Merge N lower-timeframe candles into one bar (e.g. 3×15m → 45m). */
+export function resampleCandles(candles: Candle[], barsPerGroup: number): Candle[] {
+  if (barsPerGroup < 2 || candles.length < barsPerGroup) return [];
+
+  const out: Candle[] = [];
+  const start = candles.length % barsPerGroup;
+  for (let i = start; i + barsPerGroup <= candles.length; i += barsPerGroup) {
+    const slice = candles.slice(i, i + barsPerGroup);
+    out.push({
+      openTime: slice[0].openTime,
+      open: slice[0].open,
+      high: Math.max(...slice.map((c) => c.high)),
+      low: Math.min(...slice.map((c) => c.low)),
+      close: slice[slice.length - 1].close,
+      volume: slice.reduce((s, c) => s + c.volume, 0),
+    });
+  }
+  return out;
 }
