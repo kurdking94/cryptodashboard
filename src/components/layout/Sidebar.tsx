@@ -10,6 +10,7 @@ const NAV = [
   { href: "/strategies", label: "Strategy Lab", icon: "◈" },
   { href: "/trades", label: "Trades", icon: "◫" },
   { href: "/risk", label: "Risk", icon: "◬" },
+  { href: "/replay", label: "Replay", icon: "◐" },
   { href: "/logs", label: "Logs", icon: "◧" },
 ];
 

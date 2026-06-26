@@ -3,6 +3,7 @@ export type TradeDirection = "LONG" | "SHORT";
 export type PositionStatus = "OPEN" | "CLOSED_TP" | "CLOSED_SL" | "CLOSED_MANUAL" | "LIQUIDATED";
 export type TrendBias = "BULLISH" | "BEARISH" | "NEUTRAL";
 export type Timeframe = "1m" | "5m" | "15m" | "1h" | "4h";
+export type LogCategory = "execution" | "confidence" | "error" | "signal" | "system";
 
 export interface Candle {
   openTime: number;
@@ -46,6 +47,18 @@ export interface StrategyHealth {
   totalTrades: number;
   wins: number;
   losses: number;
+  avgRR: number;
+}
+
+export interface ConfidenceBreakdown {
+  strategyAvg: number;
+  agreementBonus: number;
+  volumeBonus: number;
+  whaleBonus: number;
+  newsMultiplier: number;
+  newsPenalty: number;
+  raw: number;
+  final: number;
 }
 
 export interface ScanSignal {
@@ -66,6 +79,8 @@ export interface ScanSignal {
   whaleScore: number;
   volumeConfirmation: number;
   scannedAt: number;
+  confidenceBreakdown: ConfidenceBreakdown;
+  rankingReason: string;
 }
 
 export interface Position {
@@ -75,25 +90,35 @@ export interface Position {
   entryPrice: number;
   currentPrice: number;
   leverage: number;
-  size: number;
+  /** Margin/collateral allocated (5% of balance at entry) */
+  marginUsed: number;
+  /** Notional = margin × leverage */
+  notionalValue: number;
   takeProfit: number;
   stopLoss: number;
   liquidationPrice: number;
   pnlPercent: number;
   pnlUsd: number;
   confidence: number;
+  confidenceBreakdown: ConfidenceBreakdown;
   strategies: string[];
   status: PositionStatus;
   openedAt: number;
   closedAt?: number;
   closedPrice?: number;
   mode: BotMode;
+  signalDetectedAt: number;
+  executedAt: number;
+  executionLatencyMs: number;
+  exitReason?: string;
 }
 
 export interface RiskSettings {
   maxLeverage: number;
   maxOpenPositions: number;
-  positionSizeUsd: number;
+  /** Percent of wallet balance per trade (e.g. 5 = 5%) */
+  positionSizePercent: number;
+  initialBalance: number;
   dailyLossLimitUsd: number;
   dailyLossUsd: number;
   cooldownMinutes: number;
@@ -108,8 +133,53 @@ export interface BotLog {
   id: string;
   timestamp: number;
   level: "info" | "warn" | "error" | "trade" | "signal";
+  category: LogCategory;
   message: string;
   meta?: Record<string, unknown>;
+}
+
+export interface ConfidenceLogEntry {
+  id: string;
+  timestamp: number;
+  symbol: string;
+  rank: number;
+  confidence: number;
+  direction: TradeDirection;
+  breakdown: ConfidenceBreakdown;
+  agreeing: string[];
+  blocked?: string;
+  rankingReason: string;
+}
+
+export interface WalletState {
+  balance: number;
+  initialBalance: number;
+  usedMargin: number;
+  unrealizedPnl: number;
+  equity: number;
+  availableMargin: number;
+}
+
+export interface PaperScoreboard {
+  winRate: number;
+  profitFactor: number;
+  maxDrawdown: number;
+  avgRR: number;
+  totalTrades: number;
+  wins: number;
+  losses: number;
+  avgWin: number;
+  avgLoss: number;
+  expectancy: number;
+  totalPnl: number;
+}
+
+export interface ValidationChecks {
+  liveSignals: boolean;
+  confidenceRanking: boolean;
+  correctEntry: boolean;
+  correctExit: boolean;
+  replacement: boolean;
 }
 
 export interface BotState {
@@ -117,6 +187,7 @@ export interface BotState {
   isScanning: boolean;
   lastScanAt?: number;
   scanLatencyMs: number;
+  lastExecutionLatencyMs: number;
   pairsScanned: number;
   signals: ScanSignal[];
   positions: Position[];
@@ -125,17 +196,23 @@ export interface BotState {
   risk: RiskSettings;
   strategyHealth: StrategyHealth[];
   logs: BotLog[];
-  totalPnlUsd: number;
-  paperBalance: number;
+  confidenceLog: ConfidenceLogEntry[];
+  wallet: WalletState;
+  scoreboard: PaperScoreboard;
+  validation: ValidationChecks;
+  lastReplacementAt?: number;
 }
 
+export const INITIAL_BALANCE = 100;
+
 export const DEFAULT_RISK: RiskSettings = {
-  maxLeverage: 10,
+  maxLeverage: 20,
   maxOpenPositions: 5,
-  positionSizeUsd: 100,
-  dailyLossLimitUsd: 500,
+  positionSizePercent: 5,
+  initialBalance: INITIAL_BALANCE,
+  dailyLossLimitUsd: 25,
   dailyLossUsd: 0,
-  cooldownMinutes: 15,
+  cooldownMinutes: 5,
   killSwitch: false,
   minConfidence: 65,
   maxSpreadPercent: 0.15,

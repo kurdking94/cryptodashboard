@@ -1,4 +1,13 @@
-import type { Position, PositionStatus, RiskSettings, ScanSignal, TradeDirection } from "@/types/trading";
+import type {
+  Candle,
+  Position,
+  PositionStatus,
+  RiskSettings,
+  ScanSignal,
+  TradeDirection,
+  WalletState,
+} from "@/types/trading";
+import { calcMargin } from "@/lib/wallet";
 
 export function calcLiquidationPrice(
   entry: number,
@@ -27,20 +36,21 @@ export function calcPnl(
   current: number,
   direction: TradeDirection,
   leverage: number,
-  sizeUsd: number
+  marginUsed: number
 ): { pnlPercent: number; pnlUsd: number } {
   const raw = direction === "LONG"
     ? (current - entry) / entry
     : (entry - current) / entry;
   const pnlPercent = raw * leverage * 100;
-  const pnlUsd = raw * leverage * sizeUsd;
+  const pnlUsd = raw * leverage * marginUsed;
   return { pnlPercent: +pnlPercent.toFixed(4), pnlUsd: +pnlUsd.toFixed(4) };
 }
 
 export function canOpenPosition(
   risk: RiskSettings,
   openCount: number,
-  signal: ScanSignal
+  signal: ScanSignal,
+  wallet: WalletState
 ): { ok: boolean; reason?: string } {
   if (risk.killSwitch) return { ok: false, reason: "Kill switch active" };
   if (openCount >= risk.maxOpenPositions) return { ok: false, reason: "Max positions reached" };
@@ -52,7 +62,9 @@ export function canOpenPosition(
     const cooldownMs = risk.cooldownMinutes * 60_000;
     if (Date.now() - risk.lastLossAt < cooldownMs) return { ok: false, reason: "Cooldown after loss" };
   }
-  if (signal.newsScore < 35) return { ok: false, reason: "High news risk" };
+  if (signal.newsScore < 35) return { ok: false, reason: `High news risk (score ${signal.newsScore})` };
+  const marginNeeded = calcMargin(wallet.balance, risk.positionSizePercent);
+  if (wallet.availableMargin < marginNeeded) return { ok: false, reason: `Insufficient margin (need $${marginNeeded.toFixed(2)})` };
   return { ok: true };
 }
 
@@ -64,16 +76,17 @@ export function updatePositionPrices(
     if (p.status !== "OPEN") return p;
     const current = prices[p.symbol] ?? p.currentPrice;
     const { pnlPercent, pnlUsd } = calcPnl(
-      p.entryPrice, current, p.direction, p.leverage, p.size
+      p.entryPrice, current, p.direction, p.leverage, p.marginUsed
     );
     return { ...p, currentPrice: current, pnlPercent, pnlUsd };
   });
 }
 
-export function checkExits(positions: Position[]): {
-  updated: Position[];
-  closed: Position[];
-} {
+/** Check TP/SL using candle high/low for realistic fill simulation */
+export function checkExits(
+  positions: Position[],
+  candles?: Record<string, Candle>
+): { updated: Position[]; closed: Position[] } {
   const updated: Position[] = [];
   const closed: Position[] = [];
 
@@ -82,30 +95,47 @@ export function checkExits(positions: Position[]): {
       updated.push(p);
       continue;
     }
-    const price = p.currentPrice;
-    let status: PositionStatus = p.status;
-    let closedPrice = p.closedPrice;
+
+    const candle = candles?.[p.symbol];
+    const high = candle?.high ?? p.currentPrice;
+    const low = candle?.low ?? p.currentPrice;
+    const close = candle?.close ?? p.currentPrice;
+
+    let status: PositionStatus = "OPEN";
+    let exitPrice = close;
+    let exitReason = "";
 
     if (p.direction === "LONG") {
-      if (price >= p.takeProfit) { status = "CLOSED_TP"; closedPrice = price; }
-      else if (price <= p.stopLoss) { status = "CLOSED_SL"; closedPrice = price; }
-      else if (price <= p.liquidationPrice) { status = "LIQUIDATED"; closedPrice = price; }
+      if (low <= p.liquidationPrice) {
+        status = "LIQUIDATED"; exitPrice = p.liquidationPrice; exitReason = "Liquidation hit";
+      } else if (low <= p.stopLoss) {
+        status = "CLOSED_SL"; exitPrice = p.stopLoss; exitReason = "Stop loss hit (candle low)";
+      } else if (high >= p.takeProfit) {
+        status = "CLOSED_TP"; exitPrice = p.takeProfit; exitReason = "Take profit hit (candle high)";
+      }
     } else {
-      if (price <= p.takeProfit) { status = "CLOSED_TP"; closedPrice = price; }
-      else if (price >= p.stopLoss) { status = "CLOSED_SL"; closedPrice = price; }
-      else if (price >= p.liquidationPrice) { status = "LIQUIDATED"; closedPrice = price; }
+      if (high >= p.liquidationPrice) {
+        status = "LIQUIDATED"; exitPrice = p.liquidationPrice; exitReason = "Liquidation hit";
+      } else if (high >= p.stopLoss) {
+        status = "CLOSED_SL"; exitPrice = p.stopLoss; exitReason = "Stop loss hit (candle high)";
+      } else if (low <= p.takeProfit) {
+        status = "CLOSED_TP"; exitPrice = p.takeProfit; exitReason = "Take profit hit (candle low)";
+      }
     }
 
     if (status !== "OPEN") {
       const { pnlPercent, pnlUsd } = calcPnl(
-        p.entryPrice, closedPrice!, p.direction, p.leverage, p.size
+        p.entryPrice, exitPrice, p.direction, p.leverage, p.marginUsed
       );
       closed.push({
-        ...p, status, closedAt: Date.now(), closedPrice,
-        pnlPercent, pnlUsd,
+        ...p, status, closedAt: Date.now(), closedPrice: exitPrice,
+        currentPrice: exitPrice, pnlPercent, pnlUsd, exitReason,
       });
     } else {
-      updated.push(p);
+      const { pnlPercent, pnlUsd } = calcPnl(
+        p.entryPrice, close, p.direction, p.leverage, p.marginUsed
+      );
+      updated.push({ ...p, currentPrice: close, pnlPercent, pnlUsd });
     }
   }
   return { updated, closed };
@@ -113,28 +143,40 @@ export function checkExits(positions: Position[]): {
 
 export function openPaperPosition(
   signal: ScanSignal,
-  risk: RiskSettings
+  risk: RiskSettings,
+  wallet: WalletState,
+  signalDetectedAt: number,
+  executedAt: number
 ): Position {
+  const marginUsed = calcMargin(wallet.balance, risk.positionSizePercent);
+  const leverage = risk.maxLeverage;
+  const notionalValue = marginUsed * leverage;
   const { tp, sl } = calcTpSl(signal.price, signal.direction, signal.volatility);
+
   return {
-    id: `${signal.symbol}-${Date.now()}`,
+    id: `${signal.symbol}-${executedAt}`,
     symbol: signal.symbol,
     direction: signal.direction,
     entryPrice: signal.price,
     currentPrice: signal.price,
-    leverage: Math.min(risk.maxLeverage, 10),
-    size: risk.positionSizeUsd,
+    leverage,
+    marginUsed,
+    notionalValue,
     takeProfit: tp,
     stopLoss: sl,
-    liquidationPrice: calcLiquidationPrice(signal.price, signal.direction, risk.maxLeverage),
+    liquidationPrice: calcLiquidationPrice(signal.price, signal.direction, leverage),
     pnlPercent: 0,
     pnlUsd: 0,
     confidence: signal.confidence,
+    confidenceBreakdown: signal.confidenceBreakdown,
     strategies: signal.strategies
       .filter((s) => s.direction === signal.direction)
       .map((s) => s.name),
     status: "OPEN",
-    openedAt: Date.now(),
+    openedAt: executedAt,
     mode: "PAPER",
+    signalDetectedAt,
+    executedAt,
+    executionLatencyMs: executedAt - signalDetectedAt,
   };
 }

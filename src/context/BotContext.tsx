@@ -5,10 +5,12 @@ import {
   useCallback,
   useContext,
   useEffect,
+  useMemo,
   useRef,
   useState,
   type ReactNode,
 } from "react";
+import { fetchKlines } from "@/lib/binance/futures";
 import { runMarketScan } from "@/lib/engine/scanner";
 import {
   canOpenPosition,
@@ -16,36 +18,49 @@ import {
   openPaperPosition,
   updatePositionPrices,
 } from "@/lib/risk/manager";
+import { computeScoreboard } from "@/lib/trading/scoreboard";
+import { runReplay, type ReplayResult } from "@/lib/trading/replay";
 import { createLog, INITIAL_STRATEGY_HEALTH, updateStrategyHealth } from "@/lib/trading/helpers";
+import { buildWallet } from "@/lib/wallet";
 import type {
   BotLog,
   BotMode,
   BotState,
+  ConfidenceLogEntry,
+  LogCategory,
   Position,
   RiskSettings,
   ScanSignal,
   StrategyHealth,
+  ValidationChecks,
+  WalletState,
 } from "@/types/trading";
-import { DEFAULT_RISK } from "@/types/trading";
+import { DEFAULT_RISK, INITIAL_BALANCE } from "@/types/trading";
+import { v4 as uuidv4 } from "uuid";
 
-const STORAGE_KEY = "futures_bot_v1";
+const STORAGE_KEY = "futures_bot_v2";
 const SCAN_INTERVAL_MS = 45_000;
 
 interface BotContextValue extends BotState {
+  wallet: WalletState;
   startBot: () => void;
   stopBot: () => void;
   setMode: (mode: BotMode) => void;
   runScanNow: () => Promise<void>;
+  runReplay: (symbol: string) => Promise<ReplayResult>;
   closePosition: (id: string) => void;
   killAll: () => void;
+  resetWallet: () => void;
   updateRisk: (patch: Partial<RiskSettings>) => void;
   toggleStrategy: (id: string) => void;
-  addLog: (level: BotLog["level"], message: string, meta?: Record<string, unknown>) => void;
+  addLog: (level: BotLog["level"], category: LogCategory, message: string, meta?: Record<string, unknown>) => void;
+  executionLogs: BotLog[];
+  errorLogs: BotLog[];
 }
 
 const BotContext = createContext<BotContextValue | null>(null);
 
-function loadState(): Partial<BotState> {
+function loadState(): Partial<BotState> & { paperBalance?: number; balance?: number } {
   try {
     const raw = localStorage.getItem(STORAGE_KEY);
     return raw ? JSON.parse(raw) : {};
@@ -54,7 +69,7 @@ function loadState(): Partial<BotState> {
   }
 }
 
-function saveState(state: BotState) {
+function saveState(state: BotState & { balance: number }) {
   try {
     localStorage.setItem(STORAGE_KEY, JSON.stringify({
       mode: state.mode,
@@ -62,9 +77,11 @@ function saveState(state: BotState) {
       closedPositions: state.closedPositions.slice(-200),
       risk: state.risk,
       strategyHealth: state.strategyHealth,
-      logs: state.logs.slice(-300),
-      paperBalance: state.paperBalance,
-      totalPnlUsd: state.totalPnlUsd,
+      logs: state.logs.slice(-400),
+      confidenceLog: state.confidenceLog.slice(-100),
+      balance: state.balance,
+      validation: state.validation,
+      lastReplacementAt: state.lastReplacementAt,
     }));
   } catch { /* ignore */ }
 }
@@ -72,8 +89,9 @@ function saveState(state: BotState) {
 export function BotProvider({ children }: { children: ReactNode }) {
   const [mode, setModeState] = useState<BotMode>("PAPER");
   const [isScanning, setIsScanning] = useState(false);
-  const [lastScanAt, setLastScanAt] = useState<number | undefined>();
+  const [lastScanAt, setLastScanAt] = useState<number>();
   const [scanLatencyMs, setScanLatencyMs] = useState(0);
+  const [lastExecutionLatencyMs, setLastExecutionLatencyMs] = useState(0);
   const [pairsScanned, setPairsScanned] = useState(0);
   const [signals, setSignals] = useState<ScanSignal[]>([]);
   const [positions, setPositions] = useState<Position[]>([]);
@@ -82,13 +100,18 @@ export function BotProvider({ children }: { children: ReactNode }) {
   const [risk, setRisk] = useState<RiskSettings>(DEFAULT_RISK);
   const [strategyHealth, setStrategyHealth] = useState<StrategyHealth[]>(INITIAL_STRATEGY_HEALTH);
   const [logs, setLogs] = useState<BotLog[]>([]);
-  const [paperBalance, setPaperBalance] = useState(10_000);
-  const [totalPnlUsd, setTotalPnlUsd] = useState(0);
+  const [confidenceLog, setConfidenceLog] = useState<ConfidenceLogEntry[]>([]);
+  const [balance, setBalance] = useState(INITIAL_BALANCE);
+  const [validation, setValidation] = useState<ValidationChecks>({
+    liveSignals: false, confidenceRanking: false, correctEntry: false, correctExit: false, replacement: false,
+  });
+  const [lastReplacementAt, setLastReplacementAt] = useState<number>();
   const [botRunning, setBotRunning] = useState(false);
   const [hydrated, setHydrated] = useState(false);
   const scanLock = useRef(false);
+  const balanceRef = useRef(balance);
+  balanceRef.current = balance;
 
-  // Hydrate persisted state once on client mount
   useEffect(() => {
     const saved = loadState();
     /* eslint-disable react-hooks/set-state-in-effect -- one-time localStorage hydration */
@@ -98,119 +121,185 @@ export function BotProvider({ children }: { children: ReactNode }) {
     if (saved.risk) setRisk({ ...DEFAULT_RISK, ...saved.risk });
     if (saved.strategyHealth) setStrategyHealth(saved.strategyHealth);
     if (saved.logs) setLogs(saved.logs);
-    if (saved.paperBalance != null) setPaperBalance(saved.paperBalance);
-    if (saved.totalPnlUsd != null) setTotalPnlUsd(saved.totalPnlUsd);
+    if (saved.confidenceLog) setConfidenceLog(saved.confidenceLog);
+    if (saved.balance != null) setBalance(saved.balance);
+    else if (saved.paperBalance != null) setBalance(saved.paperBalance);
+    if (saved.validation) setValidation(saved.validation);
+    if (saved.lastReplacementAt) setLastReplacementAt(saved.lastReplacementAt);
     setHydrated(true);
     /* eslint-enable react-hooks/set-state-in-effect */
   }, []);
 
-  const addLog = useCallback((level: BotLog["level"], message: string, meta?: Record<string, unknown>) => {
-    setLogs((prev) => [...prev.slice(-299), createLog(level, message, meta)]);
+  const openPositions = useMemo(() => positions.filter((p) => p.status === "OPEN"), [positions]);
+  const wallet = useMemo(() => buildWallet(balance, risk.initialBalance, openPositions), [balance, risk.initialBalance, openPositions]);
+  const scoreboard = useMemo(() => computeScoreboard(closedPositions), [closedPositions]);
+
+  const addLog = useCallback((level: BotLog["level"], category: LogCategory, message: string, meta?: Record<string, unknown>) => {
+    setLogs((prev) => [...prev.slice(-399), createLog(level, category, message, meta)]);
   }, []);
 
-  const enabledIds = useRef(
-    new Set(strategyHealth.filter((s) => s.enabled).map((s) => s.id))
-  );
+  const executionLogs = useMemo(() => logs.filter((l) => l.category === "execution" || l.level === "trade"), [logs]);
+  const errorLogs = useMemo(() => logs.filter((l) => l.category === "error" || l.level === "error"), [logs]);
 
+  const enabledIds = useRef(new Set(strategyHealth.filter((s) => s.enabled).map((s) => s.id)));
   useEffect(() => {
     enabledIds.current = new Set(strategyHealth.filter((s) => s.enabled).map((s) => s.id));
   }, [strategyHealth]);
 
   const persist = useCallback(() => {
     saveState({
-      mode, isScanning, lastScanAt, scanLatencyMs, pairsScanned,
-      signals, positions, closedPositions, replacementQueue,
-      risk, strategyHealth, logs, paperBalance, totalPnlUsd,
+      mode, isScanning, lastScanAt, scanLatencyMs, lastExecutionLatencyMs, pairsScanned,
+      signals, positions, closedPositions, replacementQueue, risk, strategyHealth,
+      logs, confidenceLog, wallet, scoreboard, validation, lastReplacementAt, balance,
     });
-  }, [mode, isScanning, lastScanAt, scanLatencyMs, pairsScanned, signals, positions, closedPositions, replacementQueue, risk, strategyHealth, logs, paperBalance, totalPnlUsd]);
+  }, [mode, isScanning, lastScanAt, scanLatencyMs, lastExecutionLatencyMs, pairsScanned, signals, positions, closedPositions, replacementQueue, risk, strategyHealth, logs, confidenceLog, wallet, scoreboard, validation, lastReplacementAt, balance]);
 
-  useEffect(() => {
-    if (!hydrated) return;
-    persist();
-  }, [hydrated, persist]);
+  useEffect(() => { if (hydrated) persist(); }, [hydrated, persist]);
+
+  const recordConfidenceLog = useCallback((ranked: ScanSignal[], blocked: Map<string, string>) => {
+    const entries: ConfidenceLogEntry[] = ranked.map((s, i) => ({
+      id: uuidv4(),
+      timestamp: Date.now(),
+      symbol: s.symbol,
+      rank: i + 1,
+      confidence: s.confidence,
+      direction: s.direction,
+      breakdown: s.confidenceBreakdown,
+      agreeing: s.strategies.filter((st) => st.direction === s.direction).map((st) => st.name),
+      blocked: blocked.get(s.symbol),
+      rankingReason: s.rankingReason,
+    }));
+    setConfidenceLog((prev) => [...prev.slice(-80), ...entries]);
+    if (ranked.length >= 2 && ranked[0].confidence >= ranked[1].confidence) {
+      setValidation((v) => ({ ...v, confidenceRanking: true }));
+    }
+  }, []);
+
+  const handleClosed = useCallback((closed: Position[]) => {
+    for (const c of closed) {
+      addLog("trade", "execution", `EXIT ${c.symbol} ${c.status}: ${c.exitReason ?? "closed"} @ $${c.closedPrice?.toFixed(4)} PnL $${c.pnlUsd.toFixed(2)}`, { position: c });
+      setClosedPositions((cp) => [...cp, c]);
+      setBalance((b) => b + c.pnlUsd);
+      if (c.pnlUsd < 0) {
+        setRisk((r) => ({ ...r, dailyLossUsd: r.dailyLossUsd + Math.abs(c.pnlUsd), lastLossAt: Date.now() }));
+      }
+      setStrategyHealth((h) => updateStrategyHealth(h, c));
+      setValidation((v) => ({ ...v, correctExit: true }));
+    }
+  }, [addLog]);
 
   const processAutoTrades = useCallback((
     newSignals: ScanSignal[],
-    currentPositions: Position[]
-  ) => {
+    currentPositions: Position[],
+    currentWallet: WalletState,
+    scanCompletedAt: number
+  ): Position[] => {
     if (mode === "OFF" || risk.killSwitch) return currentPositions;
 
     const openSymbols = new Set(currentPositions.filter((p) => p.status === "OPEN").map((p) => p.symbol));
     const updated = [...currentPositions];
     const queue: ScanSignal[] = [];
+    const blocked = new Map<string, string>();
+    let filled = 0;
+    const slotsAvailable = risk.maxOpenPositions - updated.filter((p) => p.status === "OPEN").length;
 
     for (const signal of newSignals) {
       if (openSymbols.has(signal.symbol)) continue;
       const openCount = updated.filter((p) => p.status === "OPEN").length;
-      const check = canOpenPosition(risk, openCount, signal);
+      const check = canOpenPosition(risk, openCount, signal, currentWallet);
       if (!check.ok) {
+        blocked.set(signal.symbol, check.reason ?? "blocked");
         queue.push(signal);
         continue;
       }
-      const pos = openPaperPosition(signal, risk);
+
+      const executedAt = Date.now();
+      const pos = openPaperPosition(signal, risk, currentWallet, signal.scannedAt, executedAt);
       updated.push(pos);
       openSymbols.add(signal.symbol);
-      addLog("trade", `Opened ${signal.direction} ${signal.symbol} @ $${signal.price.toFixed(4)} (conf ${signal.confidence}%)`, { signal });
+      const latency = executedAt - scanCompletedAt;
+      setLastExecutionLatencyMs(latency);
+
+      addLog("trade", "execution",
+        `ENTRY ${signal.direction} ${signal.symbol} @ $${signal.price.toFixed(4)} | margin $${pos.marginUsed.toFixed(2)} × ${pos.leverage}x = $${pos.notionalValue.toFixed(2)} notional | conf ${signal.confidence}% | latency ${latency}ms`,
+        { signal, position: pos, breakdown: signal.confidenceBreakdown }
+      );
+
+      setValidation((v) => ({ ...v, correctEntry: true, liveSignals: true }));
+      filled++;
     }
 
-    setReplacementQueue(queue.slice(0, 10));
+    setReplacementQueue(queue.slice(0, 15));
+    if (filled > 0 && slotsAvailable > 0) {
+      setLastReplacementAt(Date.now());
+      setValidation((v) => ({ ...v, replacement: true }));
+      addLog("info", "execution", `Opened ${filled} virtual position(s) — ${slotsAvailable - filled} slot(s) remaining`);
+    }
+
     return updated;
   }, [mode, risk, addLog]);
+
+  const fetchCandlesForOpen = async (open: Position[]): Promise<Record<string, import("@/types/trading").Candle>> => {
+    const map: Record<string, import("@/types/trading").Candle> = {};
+    await Promise.allSettled(
+      open.map(async (p) => {
+        const kl = await fetchKlines(p.symbol, "1m", 2);
+        if (kl.length) map[p.symbol] = kl[kl.length - 1];
+      })
+    );
+    return map;
+  };
 
   const runScanNow = useCallback(async () => {
     if (scanLock.current) return;
     scanLock.current = true;
     setIsScanning(true);
-    addLog("info", "Market scan started — top 100 futures pairs");
+    addLog("info", "signal", "Market scan started — top 100 futures pairs");
 
     try {
-      const result = await runMarketScan(
-        enabledIds.current,
-        risk.minConfidence,
-        (_scanned) => setPairsScanned(_scanned)
-      );
+      const result = await runMarketScan(enabledIds.current, risk.minConfidence, (n) => setPairsScanned(n));
+      const scanCompletedAt = Date.now();
 
       setSignals(result.signals);
       setScanLatencyMs(result.latencyMs);
-      setLastScanAt(Date.now());
-      addLog("signal", `Scan complete: ${result.signals.length} signals from ${result.pairsScanned} pairs (${result.latencyMs}ms)`);
+      setLastScanAt(scanCompletedAt);
+      setValidation((v) => ({ ...v, liveSignals: result.signals.length > 0 }));
 
-      // Update open position prices from scan results
+      addLog("signal", "signal", `Scan complete: ${result.signals.length} signals from ${result.pairsScanned} pairs (${result.latencyMs}ms)`);
+
+      const blocked = new Map<string, string>();
+      recordConfidenceLog(result.signals, blocked);
+
       const priceMap: Record<string, number> = {};
       for (const s of result.signals) priceMap[s.symbol] = s.price;
 
+      const open = positions.filter((p) => p.status === "OPEN");
+      const candles = await fetchCandlesForOpen(open);
+      for (const [sym, c] of Object.entries(candles)) priceMap[sym] = c.close;
+
       setPositions((prev) => {
         let updated = updatePositionPrices(prev, priceMap);
-        const { updated: afterExit, closed } = checkExits(updated);
+        const { updated: afterExit, closed } = checkExits(updated, candles);
         updated = afterExit;
 
-        if (closed.length > 0) {
-          for (const c of closed) {
-            addLog("trade", `Closed ${c.symbol} ${c.status} PnL $${c.pnlUsd.toFixed(2)}`);
-            setClosedPositions((cp) => [...cp, c]);
-            setTotalPnlUsd((t) => t + c.pnlUsd);
-            setPaperBalance((b) => b + c.pnlUsd);
-            if (c.pnlUsd < 0) {
-              setRisk((r) => ({ ...r, dailyLossUsd: r.dailyLossUsd + Math.abs(c.pnlUsd), lastLossAt: Date.now() }));
-            }
-            setStrategyHealth((h) => updateStrategyHealth(h, c));
-          }
-        }
+        const closedPnl = closed.reduce((s, c) => s + c.pnlUsd, 0);
+        const effectiveBalance = balanceRef.current + closedPnl;
+        if (closed.length > 0) handleClosed(closed);
 
-        if (mode !== "OFF") {
-          updated = processAutoTrades(result.signals, updated);
+        if (mode !== "OFF" && !risk.killSwitch) {
+          const w = buildWallet(effectiveBalance, risk.initialBalance, updated);
+          updated = processAutoTrades(result.signals, updated, w, scanCompletedAt);
         }
         return updated;
       });
     } catch (err) {
-      addLog("error", `Scan failed: ${err instanceof Error ? err.message : "unknown"}`);
+      addLog("error", "error", `Scan failed: ${err instanceof Error ? err.message : "unknown"}`);
     } finally {
       setIsScanning(false);
       scanLock.current = false;
     }
-  }, [risk.minConfidence, mode, addLog, processAutoTrades]);
+  }, [risk.minConfidence, risk.killSwitch, mode, addLog, recordConfidenceLog, handleClosed, processAutoTrades, positions]);
 
-  // Auto-scan loop
   useEffect(() => {
     if (!botRunning) return;
     runScanNow();
@@ -220,17 +309,17 @@ export function BotProvider({ children }: { children: ReactNode }) {
 
   const startBot = useCallback(() => {
     setBotRunning(true);
-    addLog("info", `Bot started in ${mode} mode`);
-  }, [mode, addLog]);
+    addLog("info", "system", `Paper simulator started — $${balanceRef.current.toFixed(2)} balance, ${risk.positionSizePercent}% per trade, ${risk.maxLeverage}x leverage`);
+  }, [risk, addLog]);
 
   const stopBot = useCallback(() => {
     setBotRunning(false);
-    addLog("warn", "Bot stopped");
+    addLog("warn", "system", "Bot stopped");
   }, [addLog]);
 
   const setMode = useCallback((m: BotMode) => {
     setModeState(m);
-    addLog("info", `Mode changed to ${m}`);
+    addLog("info", "system", `Mode changed to ${m}`);
   }, [addLog]);
 
   const closePosition = useCallback((id: string) => {
@@ -238,62 +327,73 @@ export function BotProvider({ children }: { children: ReactNode }) {
       const pos = prev.find((p) => p.id === id);
       if (!pos || pos.status !== "OPEN") return prev;
       const closed: Position = {
-        ...pos,
-        status: "CLOSED_MANUAL",
-        closedAt: Date.now(),
-        closedPrice: pos.currentPrice,
+        ...pos, status: "CLOSED_MANUAL", closedAt: Date.now(),
+        closedPrice: pos.currentPrice, exitReason: "Manual close",
       };
-      setClosedPositions((cp) => [...cp, closed]);
-      setTotalPnlUsd((t) => t + closed.pnlUsd);
-      setPaperBalance((b) => b + closed.pnlUsd);
-      addLog("trade", `Manual close ${pos.symbol} PnL $${closed.pnlUsd.toFixed(2)}`);
+      handleClosed([closed]);
       return prev.filter((p) => p.id !== id);
     });
-  }, [addLog]);
+  }, [handleClosed]);
 
   const killAll = useCallback(() => {
     setPositions((prev) => {
       const open = prev.filter((p) => p.status === "OPEN");
       if (open.length === 0) return prev;
-
       const closedManual = open.map((p) => ({
-        ...p,
-        status: "CLOSED_MANUAL" as const,
-        closedAt: Date.now(),
-        closedPrice: p.currentPrice,
+        ...p, status: "CLOSED_MANUAL" as const, closedAt: Date.now(),
+        closedPrice: p.currentPrice, exitReason: "Kill switch",
       }));
-
-      setClosedPositions((cp) => [...cp, ...closedManual]);
-      const totalPnl = closedManual.reduce((s, p) => s + p.pnlUsd, 0);
-      setTotalPnlUsd((t) => t + totalPnl);
-      setPaperBalance((b) => b + totalPnl);
-      addLog("error", `KILL SWITCH — closed ${open.length} positions, total PnL $${totalPnl.toFixed(2)}`);
-
+      handleClosed(closedManual);
       return prev.filter((p) => p.status !== "OPEN");
     });
     setRisk((r) => ({ ...r, killSwitch: true }));
     setBotRunning(false);
+    addLog("error", "error", "KILL SWITCH — all positions closed, bot halted");
+  }, [handleClosed, addLog]);
+
+  const resetWallet = useCallback(() => {
+    setBalance(INITIAL_BALANCE);
+    setPositions([]);
+    setClosedPositions([]);
+    setSignals([]);
+    setReplacementQueue([]);
+    setRisk((r) => ({ ...DEFAULT_RISK, killSwitch: false, dailyLossUsd: 0 }));
+    setStrategyHealth(INITIAL_STRATEGY_HEALTH);
+    setValidation({ liveSignals: false, confidenceRanking: false, correctEntry: false, correctExit: false, replacement: false });
+    setConfidenceLog([]);
+    addLog("info", "system", `Wallet reset to $${INITIAL_BALANCE} — paper simulator ready`);
+  }, [addLog]);
+
+  const runReplayMode = useCallback(async (symbol: string) => {
+    addLog("info", "system", `Replay started for ${symbol}`);
+    try {
+      const result = await runReplay(symbol, enabledIds.current);
+      addLog("info", "system", `Replay complete: ${result.signals.length} historical signals from ${result.candlesAnalyzed} candles (${result.latencyMs}ms)`);
+      return result;
+    } catch (err) {
+      addLog("error", "error", `Replay failed: ${err instanceof Error ? err.message : "unknown"}`);
+      throw err;
+    }
   }, [addLog]);
 
   const updateRisk = useCallback((patch: Partial<RiskSettings>) => {
     setRisk((r) => ({ ...r, ...patch }));
-    addLog("info", "Risk settings updated", patch);
+    addLog("info", "system", "Risk settings updated", patch);
   }, [addLog]);
 
   const toggleStrategy = useCallback((id: string) => {
-    setStrategyHealth((prev) =>
-      prev.map((s) => s.id === id ? { ...s, enabled: !s.enabled } : s)
-    );
-    addLog("info", `Strategy toggled: ${id}`);
+    setStrategyHealth((prev) => prev.map((s) => s.id === id ? { ...s, enabled: !s.enabled } : s));
+    addLog("info", "system", `Strategy toggled: ${id}`);
   }, [addLog]);
 
   return (
     <BotContext.Provider value={{
-      mode, isScanning, lastScanAt, scanLatencyMs, pairsScanned,
-      signals, positions, closedPositions, replacementQueue,
-      risk, strategyHealth, logs, paperBalance, totalPnlUsd,
-      startBot, stopBot, setMode, runScanNow, closePosition,
-      killAll, updateRisk, toggleStrategy, addLog,
+      mode, isScanning, lastScanAt, scanLatencyMs, lastExecutionLatencyMs, pairsScanned,
+      signals, positions, closedPositions, replacementQueue, risk, strategyHealth,
+      logs, confidenceLog, wallet, scoreboard, validation, lastReplacementAt,
+      startBot, stopBot, setMode, runScanNow, runReplay: runReplayMode,
+      closePosition, killAll, resetWallet, updateRisk, toggleStrategy, addLog,
+      executionLogs, errorLogs,
     }}>
       {children}
     </BotContext.Provider>

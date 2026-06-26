@@ -1,26 +1,27 @@
 import { v4 as uuidv4 } from "uuid";
-import type { BotLog, StrategyHealth } from "@/types/trading";
+import type { BotLog, LogCategory, StrategyHealth } from "@/types/trading";
 
 export function createLog(
   level: BotLog["level"],
+  category: LogCategory,
   message: string,
   meta?: Record<string, unknown>
 ): BotLog {
-  return { id: uuidv4(), timestamp: Date.now(), level, message, meta };
+  return { id: uuidv4(), timestamp: Date.now(), level, category, message, meta };
 }
 
 export const INITIAL_STRATEGY_HEALTH: StrategyHealth[] = [
-  { id: "ema_cross", name: "EMA Crossover", enabled: true, winRate: 0, avgWin: 0, avgLoss: 0, profitFactor: 0, maxDrawdown: 0, totalTrades: 0, wins: 0, losses: 0 },
-  { id: "rsi_momentum", name: "RSI Momentum", enabled: true, winRate: 0, avgWin: 0, avgLoss: 0, profitFactor: 0, maxDrawdown: 0, totalTrades: 0, wins: 0, losses: 0 },
-  { id: "macd", name: "MACD", enabled: true, winRate: 0, avgWin: 0, avgLoss: 0, profitFactor: 0, maxDrawdown: 0, totalTrades: 0, wins: 0, losses: 0 },
-  { id: "volume_breakout", name: "Volume Breakout", enabled: true, winRate: 0, avgWin: 0, avgLoss: 0, profitFactor: 0, maxDrawdown: 0, totalTrades: 0, wins: 0, losses: 0 },
-  { id: "bollinger", name: "Bollinger Bands", enabled: true, winRate: 0, avgWin: 0, avgLoss: 0, profitFactor: 0, maxDrawdown: 0, totalTrades: 0, wins: 0, losses: 0 },
-  { id: "trend_align", name: "Trend Alignment", enabled: true, winRate: 0, avgWin: 0, avgLoss: 0, profitFactor: 0, maxDrawdown: 0, totalTrades: 0, wins: 0, losses: 0 },
+  { id: "ema_cross", name: "EMA Crossover", enabled: true, winRate: 0, avgWin: 0, avgLoss: 0, profitFactor: 0, maxDrawdown: 0, totalTrades: 0, wins: 0, losses: 0, avgRR: 0 },
+  { id: "rsi_momentum", name: "RSI Momentum", enabled: true, winRate: 0, avgWin: 0, avgLoss: 0, profitFactor: 0, maxDrawdown: 0, totalTrades: 0, wins: 0, losses: 0, avgRR: 0 },
+  { id: "macd", name: "MACD", enabled: true, winRate: 0, avgWin: 0, avgLoss: 0, profitFactor: 0, maxDrawdown: 0, totalTrades: 0, wins: 0, losses: 0, avgRR: 0 },
+  { id: "volume_breakout", name: "Volume Breakout", enabled: true, winRate: 0, avgWin: 0, avgLoss: 0, profitFactor: 0, maxDrawdown: 0, totalTrades: 0, wins: 0, losses: 0, avgRR: 0 },
+  { id: "bollinger", name: "Bollinger Bands", enabled: true, winRate: 0, avgWin: 0, avgLoss: 0, profitFactor: 0, maxDrawdown: 0, totalTrades: 0, wins: 0, losses: 0, avgRR: 0 },
+  { id: "trend_align", name: "Trend Alignment", enabled: true, winRate: 0, avgWin: 0, avgLoss: 0, profitFactor: 0, maxDrawdown: 0, totalTrades: 0, wins: 0, losses: 0, avgRR: 0 },
 ];
 
 export function updateStrategyHealth(
   health: StrategyHealth[],
-  closedTrade: { strategies: string[]; pnlUsd: number }
+  closedTrade: { strategies: string[]; pnlUsd: number; entryPrice: number; stopLoss: number; closedPrice?: number }
 ): StrategyHealth[] {
   return health.map((h) => {
     if (!closedTrade.strategies.includes(h.name)) return h;
@@ -35,14 +36,22 @@ export function updateStrategyHealth(
       ? (h.avgLoss * h.losses + Math.abs(closedTrade.pnlUsd)) / Math.max(1, losses)
       : h.avgLoss;
     const profitFactor = avgLoss > 0 ? (avgWin * wins) / (avgLoss * losses || 1) : 0;
+    const risk = Math.abs(closedTrade.entryPrice - closedTrade.stopLoss) / closedTrade.entryPrice;
+    const reward = closedTrade.closedPrice
+      ? Math.abs(closedTrade.closedPrice - closedTrade.entryPrice) / closedTrade.entryPrice
+      : 0;
+    const rr = risk > 0 ? reward / risk : 0;
+    const avgRR = total > 0 ? (h.avgRR * (total - 1) + rr) / total : rr;
+
     return {
       ...h,
       wins, losses, totalTrades: total,
       winRate: total > 0 ? (wins / total) * 100 : 0,
-      avgWin: +avgWin.toFixed(2),
-      avgLoss: +avgLoss.toFixed(2),
+      avgWin: +avgWin.toFixed(4),
+      avgLoss: +avgLoss.toFixed(4),
       profitFactor: +profitFactor.toFixed(2),
       maxDrawdown: !win ? Math.max(h.maxDrawdown, Math.abs(closedTrade.pnlUsd)) : h.maxDrawdown,
+      avgRR: +avgRR.toFixed(2),
     };
   });
 }
